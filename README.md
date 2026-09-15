@@ -168,10 +168,18 @@ the `.pptx`, `/api/preview` streams back a PNG rendered from that exact
 download. No persistence — each request renders into its own temp
 file/directory that's deleted after streaming.
 
+`POST /api/derive-template` takes `{template_base64}` and returns
+`{template_base64: <stripped>}` — the same slide-stripping as
+`derive_template.py`, exposed for the web UI's "style only" checkbox below.
+
 The web UI has an optional "PowerPoint template" file picker alongside the
-sizing PDF upload; the chosen template is remembered in the browser
-(`localStorage`) so you don't need to re-upload your company deck for every
-report.
+sizing PDF upload, with a "style only" checkbox (checked by default): when
+checked, a chosen template is distilled via `/api/derive-template` before
+it's used, so what actually gets stored and sent on every render is the
+small theme-only file, not the original branded deck. Uncheck it to use the
+template as-is and have the rack slide inserted after its existing slides
+instead. Either way, the resulting template is remembered in the browser
+(`localStorage`) so you don't need to re-upload it for every report.
 
 ### Updating / stopping
 

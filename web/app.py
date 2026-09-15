@@ -1,10 +1,11 @@
 """FastAPI front-end for qrack.
 
-Two endpoints, per CLAUDE.md: parse (so the user can confirm/edit the
-new-node guess) and render (so edits actually take effect). Uploads are
-untrusted: capped size, PDF-only, parsed against a time box, and every
-render happens in its own temp file that gets deleted after streaming --
-never a shared/static path.
+/api/parse (confirm/edit the new-node guess), /api/render and /api/preview
+(render, possibly against a template), and /api/derive-template (strip a
+template down to just its theme) -- see CLAUDE.md. Uploads are untrusted:
+capped size, magic-byte checked, parsed/rendered against a time box, and
+every render happens in its own temp file that gets deleted after
+streaming -- never a shared/static path.
 """
 
 from __future__ import annotations
@@ -26,7 +27,7 @@ from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
 from qumulo_rack.parser import ClusterReport, parse_report
-from qumulo_rack.renderer import available_stats, render_rack
+from qumulo_rack.renderer import available_stats, derive_template, render_rack
 
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # 20 MB -- sizing reports are a few hundred KB
 MAX_TEMPLATE_BYTES = 15 * 1024 * 1024  # 15 MB -- a branded deck with embedded images/logos
@@ -55,6 +56,10 @@ class RenderRequest(BaseModel):
     template_base64: str | None = Field(
         None, description="An existing .pptx, base64-encoded, to append the rack slide to and pick up its theme colors from. Omit or null for no template."
     )
+
+
+class DeriveTemplateRequest(BaseModel):
+    template_base64: str = Field(..., description="An existing .pptx, base64-encoded, to strip down to just its theme/layouts.")
 
 
 def _reject_if_not_a_sizing_report(report: ClusterReport) -> None:
@@ -134,6 +139,27 @@ async def api_parse(file: UploadFile = File(...)):
 
     _reject_if_not_a_sizing_report(report)
     return {"report": report.as_dict(), "available_stats": available_stats(report)}
+
+
+@app.post("/api/derive-template")
+def api_derive_template(req: DeriveTemplateRequest):
+    """Web equivalent of derive_template.py: strips every slide out of an
+    uploaded .pptx, keeping only its masters/layouts/theme, and hands the
+    result back as base64 -- for when the user wants the rack slide to
+    match a company deck's style without literally inserting it into that
+    whole deck. The browser swaps the response straight in as the active
+    template (and persists that smaller file instead of the original)."""
+    with _resolve_template(req.template_base64) as template_path:
+        if template_path is None:
+            raise HTTPException(422, "No template provided.")
+        with tempfile.NamedTemporaryFile(suffix=".pptx") as out_tmp:
+            try:
+                derive_template(template_path, out_tmp.name)
+            except Exception as exc:
+                raise HTTPException(422, f"Couldn't use that file as a template: {exc}") from exc
+            derived_bytes = Path(out_tmp.name).read_bytes()
+
+    return {"template_base64": base64.b64encode(derived_bytes).decode("ascii")}
 
 
 @app.post("/api/render")

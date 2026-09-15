@@ -178,6 +178,10 @@
 
     <div style="margin-top:1rem">
       <label class="field">PowerPoint template (optional)</label>
+      <label style="display:flex; align-items:center; gap:0.4rem; font-size:0.88rem; font-weight:normal; margin-bottom:0.5rem; cursor:pointer;">
+        <input type="checkbox" id="template-style-only" checked>
+        Style only &mdash; strip the template's own slides, just match its look
+      </label>
       <div class="template-row">
         <button type="button" class="secondary" id="template-btn">Choose file&hellip;</button>
         <span id="template-name" class="hint">No template selected &mdash; using default styling</span>
@@ -185,7 +189,9 @@
       </div>
       <input type="file" id="template-input" accept=".pptx" hidden>
       <div class="hint" style="margin-top:0.3rem">
-        The rack slide is appended to this deck and picks up its theme colors. Remembered in this browser.
+        With "style only" checked, the rack slide just picks up the template's theme colors. Unchecked,
+        it's appended after the template's own slides instead. Remembered in this browser (applies when
+        you pick a file &mdash; toggling it afterward needs re-choosing the file).
       </div>
     </div>
 
@@ -220,6 +226,7 @@
   const templateInput = document.getElementById('template-input');
   const templateName = document.getElementById('template-name');
   const templateClearBtn = document.getElementById('template-clear-btn');
+  const templateStyleOnlyCheckbox = document.getElementById('template-style-only');
   const previewBtn = document.getElementById('preview-btn');
   const previewCard = document.getElementById('preview-card');
   const previewImg = document.getElementById('preview-img');
@@ -396,22 +403,45 @@
     return btoa(binary);
   }
 
+  // Strips a template down to just its theme/layouts server-side (the web
+  // equivalent of derive_template.py) -- so the browser only ever has to
+  // hold onto (and persist) the small distilled file, not the original
+  // branded deck, when "style only" is checked.
+  async function deriveTemplateOnServer(base64) {
+    const resp = await fetch('/api/derive-template', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ template_base64: base64 }),
+    });
+    if (!resp.ok) {
+      const body = await resp.json().catch(() => ({}));
+      throw new Error(body.detail || ('HTTP ' + resp.status));
+    }
+    const body = await resp.json();
+    return body.template_base64;
+  }
+
   templateBtn.addEventListener('click', () => templateInput.click());
   templateInput.addEventListener('change', async () => {
     const file = templateInput.files[0];
     templateInput.value = '';
     if (!file) return;
     clearError();
-    try {
-      const buf = await file.arrayBuffer();
-      currentTemplateBase64 = arrayBufferToBase64(buf);
-      currentTemplateName = file.name;
-      updateTemplateUi();
-      saveStoredTemplate();
-      scheduleAutoPreview();
-    } catch (err) {
-      showError('Could not read that template file: ' + err.message);
-    }
+    const styleOnly = templateStyleOnlyCheckbox.checked;
+    await withButtonBusy(templateBtn, styleOnly ? 'Distilling…' : 'Reading…', async () => {
+      try {
+        const buf = await file.arrayBuffer();
+        let base64 = arrayBufferToBase64(buf);
+        if (styleOnly) base64 = await deriveTemplateOnServer(base64);
+        currentTemplateBase64 = base64;
+        currentTemplateName = file.name + (styleOnly ? ' (style only)' : '');
+        updateTemplateUi();
+        saveStoredTemplate();
+        scheduleAutoPreview();
+      } catch (err) {
+        showError('Could not use that template file: ' + err.message);
+      }
+    });
   });
   templateClearBtn.addEventListener('click', () => {
     currentTemplateBase64 = null;

@@ -197,8 +197,9 @@ Upload a sizing PDF → confirm the new-vs-existing split → download the
 unchanged; `web/static/index.html` is a single-file, no-build-step vanilla
 HTML/JS page (no SPA framework).
 
-Three endpoints, because the new-node ambiguity makes a confirm step worth
-having and previewing shouldn't require a download first:
+Four endpoints, because the new-node ambiguity makes a confirm step worth
+having, previewing shouldn't require a download first, and template
+distillation shouldn't require a round-trip through the CLI:
 
 - `POST /api/parse` (multipart PDF) → `200` with `{report: report.as_dict(),
   available_stats: [...]}` (see `renderer.available_stats` — every stat this
@@ -221,6 +222,12 @@ having and previewing shouldn't require a download first:
   - `_resolve_template()` decodes/validates the base64 (size cap, zip magic
     bytes `PK\x03\x04`) into a temp file and yields its path (or `None`);
     template-caused render failures come back as `422` rather than `500`.
+- `POST /api/derive-template` takes `{template_base64}` and returns
+  `{template_base64: <stripped>}` — the web equivalent of
+  `derive_template.py` (same underlying function), for the UI's "style
+  only" checkbox (see below): strip an uploaded deck down to just its
+  theme/layouts before it's used or persisted, so the browser never has to
+  hold onto (or `localStorage`-persist) the original full deck.
   - **`/api/preview`'s rasterization is a two-step pipeline, not a single
     `soffice --convert-to png`:** our rack slide is always the *last* slide
     in the deck (appended after any template slides), but `soffice`'s PNG
@@ -235,8 +242,14 @@ having and previewing shouldn't require a download first:
     difference when there's no template, since page 1 already is our slide.
 
 The UI shows the parsed config, lets the user fix the highlighted-as-new
-selection (and optionally the rack label and stat selection), then calls
-preview and/or render.
+selection (and optionally the rack label, stat selection, and a template),
+then calls preview and/or render. The template picker has a "style only"
+checkbox (checked by default) that, when a file is chosen, first round-trips
+it through `/api/derive-template` before storing/using it — so by default
+the browser only ever persists the small distilled file, not the original
+branded deck. The checkbox is read at file-selection time only (toggling it
+afterward needs re-choosing the file, since the raw upload isn't kept
+around once processed).
 
 `ClusterReport.from_dict()` / `NodeModel.from_dict()` (parser.py) rebuild the
 dataclasses from that edited JSON; `parse_report(source, *, name=None)`
