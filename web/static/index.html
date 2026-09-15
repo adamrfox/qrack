@@ -121,6 +121,7 @@
   }
   @keyframes spin { to { transform: rotate(360deg); } }
   #preview-img { width: 100%; border: 1px solid var(--border); border-radius: 6px; display: block; }
+  .preview-status { font-weight: normal; font-size: 0.8rem; color: var(--muted); }
   [hidden] { display: none !important; }
 </style>
 </head>
@@ -181,7 +182,7 @@
   </div>
 
   <div class="card" id="preview-card" hidden>
-    <h2>Preview</h2>
+    <h2>Preview <span id="preview-status" class="preview-status" hidden></span></h2>
     <img id="preview-img" alt="Slide preview">
   </div>
 </main>
@@ -203,9 +204,12 @@
   const previewBtn = document.getElementById('preview-btn');
   const previewCard = document.getElementById('preview-card');
   const previewImg = document.getElementById('preview-img');
+  const previewStatus = document.getElementById('preview-status');
   const renderBtn = document.getElementById('render-btn');
   const resetBtn = document.getElementById('reset-btn');
   let previewUrl = null;
+  let autoPreviewTimer = null;
+  let previewRequestSeq = 0;
 
   let currentReport = null;
   let currentAvailableStats = [];
@@ -339,22 +343,31 @@
   }
 
   statsPicker.addEventListener('change', e => {
-    if (e.target.matches('input[type="checkbox"]')) saveHiddenStats();
+    if (!e.target.matches('input[type="checkbox"]')) return;
+    saveHiddenStats();
+    scheduleAutoPreview();
   });
   statsAllBtn.addEventListener('click', () => {
     statsPicker.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.checked = true);
     saveHiddenStats();
+    scheduleAutoPreview();
   });
   statsNoneBtn.addEventListener('click', () => {
     statsPicker.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.checked = false);
     saveHiddenStats();
+    scheduleAutoPreview();
   });
+  modelsBody.addEventListener('input', e => {
+    if (e.target.matches('input[data-idx]')) scheduleAutoPreview();
+  });
+  rackLabelInput.addEventListener('input', scheduleAutoPreview);
 
   resetBtn.addEventListener('click', () => {
     currentReport = null;
     currentAvailableStats = [];
     confirmCard.hidden = true;
     previewCard.hidden = true;
+    clearTimeout(autoPreviewTimer);
     clearError();
   });
 
@@ -389,27 +402,58 @@
     }
   }
 
+  // Fetches a fresh preview and swaps the image in. `seq` staleness-guards
+  // against overlapping requests (e.g. an auto-refresh firing while a
+  // slower earlier one is still in flight) -- only the most recently
+  // *initiated* request is allowed to apply its result.
+  async function fetchAndShowPreview() {
+    const seq = ++previewRequestSeq;
+    const resp = await fetch('/api/preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(buildPayload()),
+    }).catch(() => { throw new Error('Could not reach the server'); });
+    if (seq !== previewRequestSeq) return; // superseded by a newer request
+    if (!resp.ok) {
+      const body = await resp.json().catch(() => ({}));
+      throw new Error(body.detail || ('HTTP ' + resp.status));
+    }
+    const blob = await resp.blob();
+    if (seq !== previewRequestSeq) return; // superseded while awaiting the body
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    previewUrl = URL.createObjectURL(blob);
+    previewImg.src = previewUrl;
+    previewCard.hidden = false;
+  }
+
   previewBtn.addEventListener('click', () => {
     if (!currentReport) return;
     clearError();
+    clearTimeout(autoPreviewTimer);
     withButtonBusy(previewBtn, 'Rendering&hellip;', async () => {
-      const resp = await fetch('/api/preview', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(buildPayload()),
-      }).catch(() => { throw new Error('Could not reach the server'); });
-      if (!resp.ok) {
-        const body = await resp.json().catch(() => ({}));
-        throw new Error(body.detail || ('HTTP ' + resp.status));
-      }
-      const blob = await resp.blob();
-      if (previewUrl) URL.revokeObjectURL(previewUrl);
-      previewUrl = URL.createObjectURL(blob);
-      previewImg.src = previewUrl;
-      previewCard.hidden = false;
+      await fetchAndShowPreview();
       previewCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     }).catch(err => showError('Could not render the preview: ' + err.message));
   });
+
+  // Once a preview is already showing, re-render it automatically after
+  // the user changes a new-node count, a stat selection, or the rack
+  // label -- debounced so a flurry of edits (or typing in the label
+  // field) doesn't fire a render per keystroke.
+  function scheduleAutoPreview() {
+    if (previewCard.hidden || !currentReport) return;
+    clearTimeout(autoPreviewTimer);
+    autoPreviewTimer = setTimeout(async () => {
+      previewStatus.textContent = 'Updating…';
+      previewStatus.hidden = false;
+      try {
+        await fetchAndShowPreview();
+        previewStatus.hidden = true;
+      } catch (err) {
+        previewStatus.textContent = 'Update failed: ' + err.message;
+      }
+    }, 600);
+  }
 
   renderBtn.addEventListener('click', () => {
     if (!currentReport) return;
