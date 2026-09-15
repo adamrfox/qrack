@@ -77,18 +77,42 @@ Unparsed fields come back `None` rather than raising — callers must handle tha
 
 ### `qumulo_rack.renderer`
 
-- `render_rack(report: ClusterReport, out_path: str, rack_label: str|None=None) -> str`
-  writes the `.pptx` to `out_path` and returns it.
+- `render_rack(report: ClusterReport, out_path: str, rack_label: str|None=None,
+  visible_stats=None, template_path: str|None=None) -> str` writes the
+  `.pptx` to `out_path` and returns it.
 - Palette is module-level constants at the top of the file (node / switch /
   cable colours). Centralize any theming there.
 - Slide is fixed 13.333" × 7.5" (16:9). All shapes are native `python-pptx`
   rectangles / connectors / text boxes, so the deck is hand-editable after
   generation — do not flatten anything to an image.
+- **`template_path`**: when given, `Presentation(template_path)` is used as
+  the base deck instead of a blank one — the rack slide is *appended* after
+  whatever slides the template already has, and picks up the template's
+  theme colors (title text = theme `dk1`, slide background = theme `lt1`,
+  stat-card headers = theme `accent1`, via `_theme_colors()`), falling back
+  to the normal palette constants for anything the theme doesn't define.
+  Functional colours (new-node green, Switch A/B cable colours) stay fixed
+  regardless of template, since they carry meaning. `_find_blank_layout()`
+  picks the emptiest layout in the template (preferring one literally named
+  "blank") by counting non-content placeholders (date/footer/slide-number
+  don't count) — there's no schema flag for "this is the blank layout," so
+  this is a heuristic, not a guarantee, on an unusual template. Colors are
+  resolved into local variables and threaded through as function params,
+  never mutated on shared module state, since the web app can render
+  concurrently.
+- **Known limitation:** the slide is always fixed to 13.333"×7.5" (16:9), so
+  a 4:3 template gets its aspect ratio silently overridden. Not worth
+  handling until someone actually hits it.
 
 ### `qrack.py` (CLI)
 
-`python qrack.py cluster.pdf [-o out.pptx] [--json] [--new CODE:N] [--label STR]`
-— `--json` dumps parsed config; `--new AH-96T:2` overrides the new-node guess.
+`python qrack.py cluster.pdf [-o out.pptx] [--json] [--new CODE:N] [--label STR]
+[--hide-stat KEY] [--list-stats] [--template FILE.pptx]`
+— `--json` dumps parsed config; `--new AH-96T:2` overrides the new-node guess;
+`--template` appends the rack slide to an existing deck and picks up its
+theme colors (see `render_rack`'s `template_path` above); a bad/missing
+template path is caught and re-raised as a clean `SystemExit`, not a raw
+`pptx` traceback.
 
 ## Domain facts the code encodes (don't rederive these wrong)
 
@@ -164,17 +188,34 @@ having and previewing shouldn't require a download first:
   report could show, for a selection checklist), or `422` with a clear
   message when it isn't a parseable Qumulo report.
 - `POST /api/render` and `POST /api/preview` take the same body — `{report`
-  (possibly edited by the user), `rack_label`, `visible_stats}` — and differ
-  only in what they stream back: `/api/render` streams the `.pptx` with
-  `Content-Disposition: attachment`; `/api/preview` renders that *same*
-  `.pptx` to a PNG via a `soffice --headless` subprocess and streams that
-  instead, so the preview can never drift from the real output the way a
-  from-scratch HTML/CSS redraw of the layout could. Costs a few seconds and
-  an external process per request, and pulls `libreoffice-impress` into the
-  Docker image (~500MB) — worth it for the fidelity guarantee on a
-  low-traffic internal tool; reconsider if that trade-off ever stops making
-  sense (e.g. a from-scratch canvas redraw if preview latency/image size
-  become the actual complaint).
+  (possibly edited by the user), `rack_label`, `visible_stats`,
+  `template_base64}` (the last is optional — a `.pptx`, base64-encoded, to
+  append the rack slide to; omit or `null` for the default styling) — and
+  differ only in what they stream back: `/api/render` streams the `.pptx`
+  with `Content-Disposition: attachment`; `/api/preview` renders that *same*
+  `.pptx` to a PNG and streams that instead, so the preview can never drift
+  from the real output the way a from-scratch HTML/CSS redraw of the layout
+  could. Costs a few seconds and one-to-two external processes per request,
+  and pulls `libreoffice-impress` + `poppler-utils` into the Docker image
+  (~500MB) — worth it for the fidelity guarantee on a low-traffic internal
+  tool; reconsider if that trade-off ever stops making sense (e.g. a
+  from-scratch canvas redraw if preview latency/image size become the
+  actual complaint).
+  - `_resolve_template()` decodes/validates the base64 (size cap, zip magic
+    bytes `PK\x03\x04`) into a temp file and yields its path (or `None`);
+    template-caused render failures come back as `422` rather than `500`.
+  - **`/api/preview`'s rasterization is a two-step pipeline, not a single
+    `soffice --convert-to png`:** our rack slide is always the *last* slide
+    in the deck (appended after any template slides), but `soffice`'s PNG
+    export filter only ever rasterizes slide/page 1 of a multi-page
+    conversion — there's no filter option to target another page. So preview
+    converts to PDF first (which renders every page), then uses
+    `pdftoppm -png -r 180 -f N -l N -singlefile` to pull out page `N =
+    len(Presentation(pptx_path).slides)` specifically. 180 DPI on the fixed
+    13.333"×7.5" slide is what yields exactly `PREVIEW_WIDTH_PX` ×
+    `PREVIEW_HEIGHT_PX` (2400×1350). This runs unconditionally (not just
+    when a template is given) for simplicity — it happens to be a no-op
+    difference when there's no template, since page 1 already is our slide.
 
 The UI shows the parsed config, lets the user fix the highlighted-as-new
 selection (and optionally the rack label and stat selection), then calls
@@ -237,6 +278,5 @@ Implementation notes (current state):
 - Multi-rack splitting when `total_node_ru` exceeds one rack's height (spill
   into a second rack column on the same slide).
 - Back-end switch pair when `backend_ports > 0`.
-- Config theming (expose the palette to the web UI).
 - Auth, if the web app ever needs to leave a trusted network (currently none
   by design — see the "Docker shape" decision in project history).

@@ -15,10 +15,12 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from lxml import etree
 from pptx import Presentation
 from pptx.dml.color import RGBColor
-from pptx.enum.shapes import MSO_CONNECTOR, MSO_SHAPE
+from pptx.enum.shapes import MSO_CONNECTOR, MSO_SHAPE, PP_PLACEHOLDER
 from pptx.enum.text import MSO_ANCHOR, PP_ALIGN
+from pptx.opc.constants import RELATIONSHIP_TYPE as RT
 from pptx.oxml.ns import qn
 from pptx.util import Emu, Inches, Pt
 
@@ -520,13 +522,13 @@ def _draw_rack(slide, report: ClusterReport, rack_label: str):
 # --- stats panel -------------------------------------------------------
 
 
-def _draw_stat_card(slide, cx, cy, w, title, rows, header_h, row_h, two_col):
+def _draw_stat_card(slide, cx, cy, w, title, rows, header_h, row_h, two_col, header_fill=STAT_HEADER_FILL):
     """Draw one stat card and return its height. `rows` is already the
     final (label, value) list to show -- filtering happens upstream."""
     n_lines = (len(rows) + 1) // 2 if two_col else len(rows)
     card_h = header_h + row_h * n_lines + Inches(0.1)
     _rect(slide, cx, cy, w, card_h, fill=STAT_CARD_BG, line=STAT_CARD_BORDER, line_w=Pt(0.75))
-    hshape = _rect(slide, cx, cy, w, header_h, fill=STAT_HEADER_FILL)
+    hshape = _rect(slide, cx, cy, w, header_h, fill=header_fill)
     _label_in_shape(hshape, title, Pt(12), STAT_HEADER_TEXT, bold=True, align=PP_ALIGN.LEFT)
     hshape.text_frame.margin_left = Inches(0.12)
     ry = cy + header_h + Inches(0.05)
@@ -548,7 +550,7 @@ def _draw_stat_card(slide, cx, cy, w, title, rows, header_h, row_h, two_col):
     return card_h
 
 
-def _draw_stats(slide, report: ClusterReport, visible_stats=None):
+def _draw_stats(slide, report: ClusterReport, visible_stats=None, header_fill=STAT_HEADER_FILL):
     # Sections a user deselected entirely are dropped, not shown empty --
     # the layout below adapts to however many (0-4+) are left, and to
     # however many rows each has: a user can select anywhere from a
@@ -590,27 +592,111 @@ def _draw_stats(slide, report: ClusterReport, visible_stats=None):
 
     y = RACK_Y
     for vrow in plan:
-        h = max(_draw_stat_card(slide, cx, y, w, title, rows, header_h, row_h, two_col)
+        h = max(_draw_stat_card(slide, cx, y, w, title, rows, header_h, row_h, two_col, header_fill)
                 for cx, w, title, rows, two_col in vrow)
         y += h + card_gap
+
+
+# --- templates -------------------------------------------------------
+# Applying a user's template means two independent things: (1) if it has
+# existing slides, our rack slide gets appended after them rather than
+# replacing them, and (2) a few "chrome" colors (not the functional ones --
+# new-node green and the two cable colors carry real meaning and stay fixed
+# regardless of template, so an arbitrary brand palette can't make them
+# illegible) switch to the template's own theme colors. Both need picking a
+# sensible insertion layout and reading the template's theme -- neither is
+# guaranteed to look right for every possible template, so this is a
+# best-effort, same spirit as the new-node-guess: do the sensible thing,
+# don't silently produce garbage if a template is unusual.
+
+_NON_CONTENT_PLACEHOLDER_TYPES = {PP_PLACEHOLDER.DATE, PP_PLACEHOLDER.FOOTER, PP_PLACEHOLDER.SLIDE_NUMBER}
+
+
+def _find_blank_layout(prs: Presentation):
+    """The layout with the fewest real content placeholders (date/footer/
+    slide-number don't count -- the stock "Blank" layout carries those
+    three and nothing else), preferring one literally named "blank" as a
+    tie-breaker. There's no schema-level "this is the blank one" flag in
+    OOXML -- layout order and naming are just convention -- so this is a
+    heuristic, not a guarantee, for an arbitrary uploaded template."""
+    layouts = list(prs.slide_layouts)
+    if not layouts:
+        return None
+
+    def content_placeholder_count(layout):
+        return sum(1 for ph in layout.placeholders if ph.placeholder_format.type not in _NON_CONTENT_PLACEHOLDER_TYPES)
+
+    named_blank = [l for l in layouts if "blank" in (l.name or "").lower()]
+    pool = named_blank or layouts
+    return min(pool, key=content_placeholder_count)
+
+
+def _theme_colors(slide_master) -> dict:
+    """`{'accent1': RGBColor(...), 'dk1': ..., 'lt1': ..., ...}` from the
+    given master's theme part. A color can be a literal `srgbClr` or a
+    `sysClr` (a named system color, e.g. "windowText") carrying its actual
+    RGB as a `lastClr` fallback attribute -- handle both. Returns {} rather
+    than raising if the theme part is missing or unrecognizable; callers
+    fall back to the module's own default colors either way."""
+    try:
+        theme_part = slide_master.part.part_related_by(RT.THEME)
+        root = etree.fromstring(theme_part.blob)
+    except Exception:
+        return {}
+
+    ns = {"a": "http://schemas.openxmlformats.org/drawingml/2006/main"}
+    scheme = root.find(".//a:clrScheme", ns)
+    if scheme is None:
+        return {}
+
+    colors = {}
+    for child in scheme:
+        name = etree.QName(child).localname  # e.g. "accent1", "dk1"
+        srgb = child.find("a:srgbClr", ns)
+        sys_clr = child.find("a:sysClr", ns)
+        val = srgb.get("val") if srgb is not None else (sys_clr.get("lastClr") if sys_clr is not None else None)
+        if val:
+            colors[name] = RGBColor.from_string(val)
+    return colors
 
 
 # --- entry point -------------------------------------------------------
 
 
 def render_rack(report: ClusterReport, out_path: str, rack_label: str | None = None,
-                 visible_stats=None) -> str:
+                 visible_stats=None, template_path: str | None = None) -> str:
     """`visible_stats`, when given, is an iterable of stat keys (see
     `available_stats`) -- only those appear in the stats panel, and a
     section left with none of its stats selected is omitted entirely.
-    `None` (the default) shows every stat, matching the CLI's behavior."""
+    `None` (the default) shows every stat, matching the CLI's behavior.
+
+    `template_path`, when given, is an existing .pptx: our rack slide is
+    appended after any slides it already has, using a heuristically-chosen
+    blank-ish layout from it, and a few chrome colors (title text, stat
+    header bars, background) switch to that template's theme colors. Slide
+    dimensions are always forced to this module's fixed 16:9 design
+    regardless of the template's own size -- if that differs from the
+    template's native size, its *existing* slides (their shapes keep their
+    original absolute positions) may look cropped or off-center against
+    the new canvas size. Proportionally rescaling this renderer's geometry
+    to match an arbitrary template size is a real but not-yet-built
+    follow-up; for now this only reliably looks right for a same-aspect-
+    ratio (16:9) template, or one with no existing slides to clash with.
+    """
     visible_stats = set(visible_stats) if visible_stats is not None else None
-    prs = Presentation()
+    prs = Presentation(template_path) if template_path else Presentation()
     prs.slide_width = SLIDE_W
     prs.slide_height = SLIDE_H
-    slide = prs.slides.add_slide(prs.slide_layouts[6])  # blank layout
 
-    bg = _rect(slide, 0, 0, SLIDE_W, SLIDE_H, fill=SLIDE_BG)
+    layout = _find_blank_layout(prs)
+    slide = prs.slides.add_slide(layout)
+
+    theme = _theme_colors(layout.slide_master) if template_path else {}
+    bg_color = theme.get("lt1", SLIDE_BG)
+    title_color = theme.get("dk1", TITLE_TEXT)
+    header_fill = theme.get("accent1", STAT_HEADER_FILL)
+
+    bg = _rect(slide, 0, 0, SLIDE_W, SLIDE_H, fill=bg_color)
     slide.shapes._spTree.remove(bg._element)
     slide.shapes._spTree.insert(2, bg._element)
 
@@ -619,13 +705,13 @@ def render_rack(report: ClusterReport, out_path: str, rack_label: str | None = N
         node_summary = f"{(report.node_count or 0) - report.added_nodes} existing + {report.added_nodes} new nodes"
 
     title = report.title or "Qumulo Cluster"
-    _text(slide, Inches(0.55), Inches(0.28), Inches(9), Inches(0.4), title, Pt(24), TITLE_TEXT, bold=True)
+    _text(slide, Inches(0.55), Inches(0.28), Inches(9), Inches(0.4), title, Pt(24), title_color, bold=True)
     subtitle_bits = [b for b in [node_summary, _fmt(report.usable_tb, " TB Usable", 2)] if b]
     _text(slide, Inches(0.55), Inches(0.68), Inches(9), Inches(0.3), " • ".join(subtitle_bits), Pt(13), SUBTITLE_TEXT)
 
     label = rack_label or "Rack 1"
     rack_bottom = _draw_rack(slide, report, label)
-    _draw_stats(slide, report, visible_stats)
+    _draw_stats(slide, report, visible_stats, header_fill=header_fill)
 
     if report.source_file:
         source_y = min(rack_bottom, SLIDE_H - Inches(0.32))

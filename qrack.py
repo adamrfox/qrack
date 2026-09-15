@@ -2,7 +2,7 @@
 """CLI: sizing PDF -> rack elevation .pptx.
 
     python qrack.py cluster.pdf [-o out.pptx] [--json] [--new CODE:N] [--label STR]
-                                 [--hide-stat KEY] [--list-stats]
+                                 [--hide-stat KEY] [--list-stats] [--template FILE.pptx]
 """
 
 import argparse
@@ -50,6 +50,9 @@ def main(argv=None) -> int:
                      help="hide a stat from the stats panel by key (repeatable); see --list-stats for keys")
     ap.add_argument("--list-stats", action="store_true",
                      help="list this report's available stat keys (for --hide-stat) and exit; no slide is produced")
+    ap.add_argument("--template", metavar="FILE.pptx",
+                     help="an existing .pptx to append the rack slide to, picking up its theme colors "
+                          "(functional colors -- new-node green, cable colors -- stay fixed regardless)")
     args = ap.parse_args(argv)
 
     report = parse_report(args.pdf)
@@ -87,7 +90,13 @@ def main(argv=None) -> int:
         visible_stats = all_keys - set(args.hide_stat)
 
     out_path = args.out or (args.pdf.rsplit(".", 1)[0] + ".rack.pptx")
-    render_rack(report, out_path, rack_label=args.label, visible_stats=visible_stats)
+    try:
+        render_rack(report, out_path, rack_label=args.label, visible_stats=visible_stats,
+                    template_path=args.template)
+    except Exception as exc:
+        if args.template:
+            raise SystemExit(f"--template: couldn't open {args.template!r} as a .pptx: {exc}")
+        raise
     print(f"wrote {out_path}")
     return 0
 

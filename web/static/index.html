@@ -122,6 +122,8 @@
   @keyframes spin { to { transform: rotate(360deg); } }
   #preview-img { width: 100%; border: 1px solid var(--border); border-radius: 6px; display: block; }
   .preview-status { font-weight: normal; font-size: 0.8rem; color: var(--muted); }
+  .hint { font-size: 0.85rem; color: var(--muted); }
+  .template-row { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
   [hidden] { display: none !important; }
 </style>
 </head>
@@ -174,6 +176,19 @@
       <input type="text" id="rack-label" placeholder="e.g. Row 3 / Rack 12">
     </div>
 
+    <div style="margin-top:1rem">
+      <label class="field">PowerPoint template (optional)</label>
+      <div class="template-row">
+        <button type="button" class="secondary" id="template-btn">Choose file&hellip;</button>
+        <span id="template-name" class="hint">No template selected &mdash; using default styling</span>
+        <button type="button" class="secondary" id="template-clear-btn" hidden>Remove</button>
+      </div>
+      <input type="file" id="template-input" accept=".pptx" hidden>
+      <div class="hint" style="margin-top:0.3rem">
+        The rack slide is appended to this deck and picks up its theme colors. Remembered in this browser.
+      </div>
+    </div>
+
     <div class="actions">
       <button class="secondary" id="preview-btn">Preview</button>
       <button id="render-btn">Generate slide</button>
@@ -201,6 +216,10 @@
   const statsAllBtn = document.getElementById('stats-all-btn');
   const statsNoneBtn = document.getElementById('stats-none-btn');
   const rackLabelInput = document.getElementById('rack-label');
+  const templateBtn = document.getElementById('template-btn');
+  const templateInput = document.getElementById('template-input');
+  const templateName = document.getElementById('template-name');
+  const templateClearBtn = document.getElementById('template-clear-btn');
   const previewBtn = document.getElementById('preview-btn');
   const previewCard = document.getElementById('preview-card');
   const previewImg = document.getElementById('preview-img');
@@ -213,6 +232,8 @@
 
   let currentReport = null;
   let currentAvailableStats = [];
+  let currentTemplateBase64 = null;
+  let currentTemplateName = null;
 
   function showError(msg) {
     errorBox.textContent = msg;
@@ -320,6 +341,89 @@
     }
   }
 
+  // Remembers the chosen template per browser, same rationale as the stats
+  // selection above -- so a company template doesn't need re-uploading for
+  // every report. Stored as base64 since that's also the wire format
+  // /api/render and /api/preview expect; a large branded deck can run into
+  // localStorage's per-origin quota (~5-10MB), in which case it simply
+  // won't persist -- it still works for the current session.
+  const TEMPLATE_STORAGE_KEY = 'qrack.template';
+
+  function loadStoredTemplate() {
+    try {
+      const raw = localStorage.getItem(TEMPLATE_STORAGE_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      if (parsed && parsed.data && parsed.name) {
+        currentTemplateBase64 = parsed.data;
+        currentTemplateName = parsed.name;
+      }
+    } catch {
+      // ignore -- private browsing / storage disabled / corrupt entry
+    }
+  }
+
+  function saveStoredTemplate() {
+    try {
+      if (currentTemplateBase64) {
+        localStorage.setItem(TEMPLATE_STORAGE_KEY,
+          JSON.stringify({ name: currentTemplateName, data: currentTemplateBase64 }));
+      } else {
+        localStorage.removeItem(TEMPLATE_STORAGE_KEY);
+      }
+    } catch {
+      // quota exceeded or storage disabled -- fine, just won't persist
+    }
+  }
+
+  function updateTemplateUi() {
+    if (currentTemplateBase64) {
+      templateName.textContent = currentTemplateName;
+      templateClearBtn.hidden = false;
+    } else {
+      templateName.textContent = 'No template selected — using default styling';
+      templateClearBtn.hidden = true;
+    }
+  }
+
+  function arrayBufferToBase64(buf) {
+    let binary = '';
+    const bytes = new Uint8Array(buf);
+    const chunkSize = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+    }
+    return btoa(binary);
+  }
+
+  templateBtn.addEventListener('click', () => templateInput.click());
+  templateInput.addEventListener('change', async () => {
+    const file = templateInput.files[0];
+    templateInput.value = '';
+    if (!file) return;
+    clearError();
+    try {
+      const buf = await file.arrayBuffer();
+      currentTemplateBase64 = arrayBufferToBase64(buf);
+      currentTemplateName = file.name;
+      updateTemplateUi();
+      saveStoredTemplate();
+      scheduleAutoPreview();
+    } catch (err) {
+      showError('Could not read that template file: ' + err.message);
+    }
+  });
+  templateClearBtn.addEventListener('click', () => {
+    currentTemplateBase64 = null;
+    currentTemplateName = null;
+    updateTemplateUi();
+    saveStoredTemplate();
+    scheduleAutoPreview();
+  });
+
+  loadStoredTemplate();
+  updateTemplateUi();
+
   function renderStatsPicker() {
     const bySection = new Map();
     currentAvailableStats.forEach(s => {
@@ -387,6 +491,7 @@
       report: currentReport,
       rack_label: rackLabelInput.value || null,
       visible_stats: visibleStats,
+      template_base64: currentTemplateBase64 || null,
     };
   }
 

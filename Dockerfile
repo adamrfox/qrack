@@ -4,8 +4,12 @@ WORKDIR /app
 
 # libreoffice-impress (not the full libreoffice suite) renders the .pptx
 # preview image server-side, from the exact same file a user would
-# download -- no separate layout implementation to keep in sync.
-RUN apt-get update && apt-get install -y --no-install-recommends libreoffice-impress \
+# download -- no separate layout implementation to keep in sync. Our slide
+# can be appended after a user-supplied template's own slides, and soffice's
+# PNG export only ever rasterizes page 1 of a multi-page conversion, so the
+# preview goes via PDF (every page) + poppler-utils' pdftoppm to pull out
+# the one page we actually want.
+RUN apt-get update && apt-get install -y --no-install-recommends libreoffice-impress poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .

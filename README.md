@@ -31,6 +31,7 @@ python qrack.py cluster.pdf --new AH-96T:2  # override the new-node guess
 python qrack.py cluster.pdf --label "Row 3 / Rack 12"
 python qrack.py cluster.pdf --list-stats    # list this report's stat keys, no slide
 python qrack.py cluster.pdf --hide-stat iops --hide-stat encoding
+python qrack.py cluster.pdf --template corp-deck.pptx  # append to an existing deck, match its theme colors
 ```
 
 Dependencies: `pip install pdfplumber python-pptx`.
@@ -150,12 +151,19 @@ without adding auth or putting it behind something that provides it (see the
 parsed config for the confirm step, plus every stat key/label/section this
 report could show (for a selection checklist). `POST /api/render` and
 `POST /api/preview` take the same body — that report (possibly edited),
-`rack_label`, and an optional `visible_stats: [key, ...]` (omit or leave
-`null` to show everything) — `/api/render` streams back the `.pptx`,
-`/api/preview` streams back a PNG rendered from that exact `.pptx` via
-LibreOffice, so what you preview can't drift from what you'd download. No
-persistence — each request renders into its own temp file/directory that's
-deleted after streaming.
+`rack_label`, an optional `visible_stats: [key, ...]` (omit or leave `null`
+to show everything), and an optional `template_base64` (an existing `.pptx`,
+base64-encoded, to append the rack slide to and pick up its theme colors —
+omit or leave `null` for the default styling) — `/api/render` streams back
+the `.pptx`, `/api/preview` streams back a PNG rendered from that exact
+`.pptx` via LibreOffice, so what you preview can't drift from what you'd
+download. No persistence — each request renders into its own temp
+file/directory that's deleted after streaming.
+
+The web UI has an optional "PowerPoint template" file picker alongside the
+sizing PDF upload; the chosen template is remembered in the browser
+(`localStorage`) so you don't need to re-upload your company deck for every
+report.
 
 ### Updating / stopping
 
