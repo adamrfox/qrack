@@ -156,16 +156,29 @@ Upload a sizing PDF → confirm the new-vs-existing split → download the
 unchanged; `web/static/index.html` is a single-file, no-build-step vanilla
 HTML/JS page (no SPA framework).
 
-Two endpoints, because the new-node ambiguity makes a confirm step worth
-having:
+Three endpoints, because the new-node ambiguity makes a confirm step worth
+having and previewing shouldn't require a download first:
 
-- `POST /api/parse` (multipart PDF) → `200` with `report.as_dict()`, or `422`
-  with a clear message when it isn't a parseable Qumulo report.
-- `POST /api/render` (JSON `{report, rack_label}`, `report` possibly edited by
-  the user) → streams the `.pptx` with `Content-Disposition: attachment`.
+- `POST /api/parse` (multipart PDF) → `200` with `{report: report.as_dict(),
+  available_stats: [...]}` (see `renderer.available_stats` — every stat this
+  report could show, for a selection checklist), or `422` with a clear
+  message when it isn't a parseable Qumulo report.
+- `POST /api/render` and `POST /api/preview` take the same body — `{report`
+  (possibly edited by the user), `rack_label`, `visible_stats}` — and differ
+  only in what they stream back: `/api/render` streams the `.pptx` with
+  `Content-Disposition: attachment`; `/api/preview` renders that *same*
+  `.pptx` to a PNG via a `soffice --headless` subprocess and streams that
+  instead, so the preview can never drift from the real output the way a
+  from-scratch HTML/CSS redraw of the layout could. Costs a few seconds and
+  an external process per request, and pulls `libreoffice-impress` into the
+  Docker image (~500MB) — worth it for the fidelity guarantee on a
+  low-traffic internal tool; reconsider if that trade-off ever stops making
+  sense (e.g. a from-scratch canvas redraw if preview latency/image size
+  become the actual complaint).
 
 The UI shows the parsed config, lets the user fix the highlighted-as-new
-selection (and optionally the rack label), then calls render.
+selection (and optionally the rack label and stat selection), then calls
+preview and/or render.
 
 `ClusterReport.from_dict()` / `NodeModel.from_dict()` (parser.py) rebuild the
 dataclasses from that edited JSON; `parse_report(source, *, name=None)`
@@ -177,11 +190,13 @@ survive for the download filename.
 Implementation notes (current state):
 
 - FastAPI + uvicorn; single container serves both the JSON API and the static
-  page (`Dockerfile`, `docker run -p 8000:8000 qrack`). No auth — see "Not yet
-  built" if that changes.
+  page (see README for the current `docker run` invocation — HTTP + HTTPS
+  ports, cert mounts). No auth — see "Not yet built" if that changes.
 - Each render writes to its own `NamedTemporaryFile`, streams it back via
   `BackgroundTask(os.unlink, ...)` so it's deleted right after the response
-  completes. Never a shared/static path.
+  completes; each preview does the same with a `TemporaryDirectory` (needs a
+  directory, not just a file, for its own LibreOffice profile — see
+  `api_preview`). Never a shared/static path.
 - Upload validation: 20 MB cap, `%PDF-` magic-byte check, content-type check;
   after parse, 422 if `report.models` is empty or `report.usable_tb is None`.
   The upload filename is never trusted for anything but the display label

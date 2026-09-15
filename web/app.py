@@ -10,13 +10,14 @@ never a shared/static path.
 from __future__ import annotations
 
 import os
+import subprocess
 import tempfile
 import time
 from pathlib import Path
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
@@ -25,6 +26,9 @@ from qumulo_rack.renderer import available_stats, render_rack
 
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # 20 MB -- sizing reports are a few hundred KB
 PARSE_TIMEOUT_SECONDS = 20
+PREVIEW_TIMEOUT_SECONDS = 25
+PREVIEW_WIDTH_PX = 2400
+PREVIEW_HEIGHT_PX = 1350
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -50,6 +54,15 @@ def _reject_if_not_a_sizing_report(report: ClusterReport) -> None:
         raise HTTPException(422, "Couldn't find an 'All Nodes' section -- this doesn't look like a Qumulo sizing report.")
     if report.usable_tb is None:
         raise HTTPException(422, "Couldn't find usable capacity -- this doesn't look like a Qumulo sizing report.")
+
+
+def _build_report(req: "RenderRequest") -> ClusterReport:
+    try:
+        report = ClusterReport.from_dict(req.report)
+    except TypeError as exc:
+        raise HTTPException(422, f"Malformed report config: {exc}") from exc
+    _reject_if_not_a_sizing_report(report)
+    return report
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -92,11 +105,7 @@ async def api_parse(file: UploadFile = File(...)):
 
 @app.post("/api/render")
 def api_render(req: RenderRequest):
-    try:
-        report = ClusterReport.from_dict(req.report)
-    except TypeError as exc:
-        raise HTTPException(422, f"Malformed report config: {exc}") from exc
-    _reject_if_not_a_sizing_report(report)
+    report = _build_report(req)
 
     tmp = tempfile.NamedTemporaryFile(suffix=".pptx", delete=False)
     tmp.close()
@@ -114,3 +123,43 @@ def api_render(req: RenderRequest):
         filename=filename,
         background=BackgroundTask(os.unlink, tmp.name),
     )
+
+
+@app.post("/api/preview")
+def api_preview(req: RenderRequest):
+    """Renders the exact same .pptx /api/render would produce, then
+    rasterizes it with LibreOffice -- so the preview can never drift from
+    what a download actually looks like, at the cost of a few seconds and
+    an external process per request."""
+    report = _build_report(req)
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        pptx_path = os.path.join(tmp_dir, "slide.pptx")
+        render_rack(report, pptx_path, rack_label=req.rack_label or None, visible_stats=req.visible_stats)
+
+        # A dedicated profile dir per request avoids soffice's user-profile
+        # lock contention under concurrent preview requests.
+        profile_dir = os.path.join(tmp_dir, "lo_profile")
+        png_filter = (
+            f'png:impress_png_Export:{{"PixelWidth":{{"type":"long","value":{PREVIEW_WIDTH_PX}}},'
+            f'"PixelHeight":{{"type":"long","value":{PREVIEW_HEIGHT_PX}}}}}'
+        )
+        try:
+            result = subprocess.run(
+                ["soffice", "--headless", f"-env:UserInstallation=file://{profile_dir}",
+                 "--convert-to", png_filter, "--outdir", tmp_dir, pptx_path],
+                capture_output=True, text=True, timeout=PREVIEW_TIMEOUT_SECONDS,
+            )
+        except FileNotFoundError:
+            raise HTTPException(501, "Preview isn't available -- LibreOffice isn't installed on this server.")
+        except subprocess.TimeoutExpired:
+            raise HTTPException(504, "Preview rendering took too long.")
+
+        png_path = os.path.join(tmp_dir, "slide.png")
+        if result.returncode != 0 or not os.path.exists(png_path):
+            detail = (result.stderr or "").strip()[-500:]
+            raise HTTPException(500, f"Preview rendering failed: {detail or 'unknown error'}")
+
+        png_bytes = Path(png_path).read_bytes()
+
+    return Response(content=png_bytes, media_type="image/png")

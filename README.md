@@ -148,11 +148,14 @@ without adding auth or putting it behind something that provides it (see the
 
 `POST /api/parse` (multipart PDF) returns `{report, available_stats}` — the
 parsed config for the confirm step, plus every stat key/label/section this
-report could show (for a selection checklist). `POST /api/render` (that
-report, possibly edited, plus an optional `visible_stats: [key, ...]` —
-omit or leave `null` to show everything) streams back the `.pptx`. No
-persistence — each render happens in its own temp file that's deleted after
-streaming.
+report could show (for a selection checklist). `POST /api/render` and
+`POST /api/preview` take the same body — that report (possibly edited),
+`rack_label`, and an optional `visible_stats: [key, ...]` (omit or leave
+`null` to show everything) — `/api/render` streams back the `.pptx`,
+`/api/preview` streams back a PNG rendered from that exact `.pptx` via
+LibreOffice, so what you preview can't drift from what you'd download. No
+persistence — each request renders into its own temp file/directory that's
+deleted after streaming.
 
 ### Updating / stopping
 

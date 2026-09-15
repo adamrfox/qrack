@@ -120,6 +120,7 @@
     border-top-color: transparent; border-radius: 50%; animation: spin 0.7s linear infinite; margin-right: 0.4rem;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
+  #preview-img { width: 100%; border: 1px solid var(--border); border-radius: 6px; display: block; }
   [hidden] { display: none !important; }
 </style>
 </head>
@@ -173,9 +174,15 @@
     </div>
 
     <div class="actions">
+      <button class="secondary" id="preview-btn">Preview</button>
       <button id="render-btn">Generate slide</button>
       <button class="secondary" id="reset-btn">Start over</button>
     </div>
+  </div>
+
+  <div class="card" id="preview-card" hidden>
+    <h2>Preview</h2>
+    <img id="preview-img" alt="Slide preview">
   </div>
 </main>
 
@@ -193,8 +200,12 @@
   const statsAllBtn = document.getElementById('stats-all-btn');
   const statsNoneBtn = document.getElementById('stats-none-btn');
   const rackLabelInput = document.getElementById('rack-label');
+  const previewBtn = document.getElementById('preview-btn');
+  const previewCard = document.getElementById('preview-card');
+  const previewImg = document.getElementById('preview-img');
   const renderBtn = document.getElementById('render-btn');
   const resetBtn = document.getElementById('reset-btn');
+  let previewUrl = null;
 
   let currentReport = null;
   let currentAvailableStats = [];
@@ -343,13 +354,11 @@
     currentReport = null;
     currentAvailableStats = [];
     confirmCard.hidden = true;
+    previewCard.hidden = true;
     clearError();
   });
 
-  renderBtn.addEventListener('click', async () => {
-    if (!currentReport) return;
-    clearError();
-
+  function buildPayload() {
     const inputs = modelsBody.querySelectorAll('input[data-idx]');
     inputs.forEach(inp => {
       const idx = Number(inp.dataset.idx);
@@ -361,17 +370,55 @@
     const visibleStats = Array.from(statsPicker.querySelectorAll('input[type="checkbox"]:checked'))
       .map(cb => cb.dataset.statKey);
 
-    renderBtn.disabled = true;
-    renderBtn.innerHTML = '<span class="spinner"></span>Generating&hellip;';
+    return {
+      report: currentReport,
+      rack_label: rackLabelInput.value || null,
+      visible_stats: visibleStats,
+    };
+  }
+
+  async function withButtonBusy(btn, busyLabel, fn) {
+    const originalLabel = btn.textContent;
+    btn.disabled = true;
+    btn.innerHTML = `<span class="spinner"></span>${busyLabel}`;
     try {
+      await fn();
+    } finally {
+      btn.disabled = false;
+      btn.textContent = originalLabel;
+    }
+  }
+
+  previewBtn.addEventListener('click', () => {
+    if (!currentReport) return;
+    clearError();
+    withButtonBusy(previewBtn, 'Rendering&hellip;', async () => {
+      const resp = await fetch('/api/preview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(buildPayload()),
+      }).catch(() => { throw new Error('Could not reach the server'); });
+      if (!resp.ok) {
+        const body = await resp.json().catch(() => ({}));
+        throw new Error(body.detail || ('HTTP ' + resp.status));
+      }
+      const blob = await resp.blob();
+      if (previewUrl) URL.revokeObjectURL(previewUrl);
+      previewUrl = URL.createObjectURL(blob);
+      previewImg.src = previewUrl;
+      previewCard.hidden = false;
+      previewCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }).catch(err => showError('Could not render the preview: ' + err.message));
+  });
+
+  renderBtn.addEventListener('click', () => {
+    if (!currentReport) return;
+    clearError();
+    withButtonBusy(renderBtn, 'Generating&hellip;', async () => {
       const resp = await fetch('/api/render', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          report: currentReport,
-          rack_label: rackLabelInput.value || null,
-          visible_stats: visibleStats,
-        }),
+        body: JSON.stringify(buildPayload()),
       });
       if (!resp.ok) {
         const body = await resp.json().catch(() => ({}));
@@ -390,12 +437,7 @@
       a.click();
       a.remove();
       URL.revokeObjectURL(url);
-    } catch (err) {
-      showError('Could not generate the slide: ' + err.message);
-    } finally {
-      renderBtn.disabled = false;
-      renderBtn.textContent = 'Generate slide';
-    }
+    }).catch(err => showError('Could not generate the slide: ' + err.message));
   });
 })();
 </script>

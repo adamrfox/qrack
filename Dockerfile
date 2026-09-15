@@ -2,6 +2,12 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
+# libreoffice-impress (not the full libreoffice suite) renders the .pptx
+# preview image server-side, from the exact same file a user would
+# download -- no separate layout implementation to keep in sync.
+RUN apt-get update && apt-get install -y --no-install-recommends libreoffice-impress \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
