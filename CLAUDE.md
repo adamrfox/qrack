@@ -43,6 +43,7 @@ README.md
 CLAUDE.md
 samples/         # example sizing PDFs for regression testing (gitignored -- these
                  # tend to be real customer/prospect data; keep local only)
+derive_template.py  # CLI: strip an existing .pptx down to just its theme/layouts
 ```
 
 Keep `parser.py` and `renderer.py` free of any web/CLI/framework imports so
@@ -103,6 +104,16 @@ Unparsed fields come back `None` rather than raising — callers must handle tha
 - **Known limitation:** the slide is always fixed to 13.333"×7.5" (16:9), so
   a 4:3 template gets its aspect ratio silently overridden. Not worth
   handling until someone actually hits it.
+- `derive_template(source_path: str, out_path: str) -> str` strips every
+  slide out of an existing `.pptx` via the standard python-pptx recipe
+  (remove each `<p:sldId>` from `prs.slides._sldIdLst` and `drop_rel` its
+  relationship — there's no public "delete slide" API), leaving only the
+  masters/layouts/theme that `template_path` above actually reads. Meant as
+  a one-time distillation step: point it at someone's real 40-slide branded
+  deck once, get back a small style-only file, use *that* as `template_path`
+  from then on instead of carrying the original deck's slides along on
+  every render. Verified against a deck with images and speaker notes, not
+  just a bare theme file — those get dropped along with their slides.
 
 ### `qrack.py` (CLI)
 
@@ -113,6 +124,12 @@ Unparsed fields come back `None` rather than raising — callers must handle tha
 theme colors (see `render_rack`'s `template_path` above); a bad/missing
 template path is caught and re-raised as a clean `SystemExit`, not a raw
 `pptx` traceback.
+
+### `derive_template.py` (CLI)
+
+`python derive_template.py corp-deck.pptx [-o corp-template.pptx]` — thin
+wrapper around `renderer.derive_template`; same clean-`SystemExit` handling
+for a bad input path.
 
 ## Domain facts the code encodes (don't rederive these wrong)
 

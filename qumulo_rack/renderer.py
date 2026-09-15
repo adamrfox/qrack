@@ -660,6 +660,31 @@ def _theme_colors(slide_master) -> dict:
     return colors
 
 
+def derive_template(source_path: str, out_path: str) -> str:
+    """Strips every slide out of an existing .pptx, leaving only its slide
+    masters/layouts/theme -- so a large branded deck can be distilled once
+    into a small, content-free file for `render_rack`'s `template_path`
+    (or the web app's template upload), instead of carrying every one of
+    the source deck's original slides along on every render. What survives
+    (masters, layouts, theme colors/fonts) is exactly what `render_rack`
+    and `_theme_colors` actually read from a template -- nothing here
+    depends on any slide *content*.
+
+    python-pptx has no public "delete slide" API; this uses the documented
+    community recipe of removing each slide's entry from the presentation's
+    `<p:sldIdLst>` and dropping its relationship, which is what every slide
+    deletion in python-pptx (there's no built-in method) is built on.
+    """
+    prs = Presentation(source_path)
+    slide_id_list = prs.slides._sldIdLst
+    for slide_id in list(slide_id_list):
+        r_id = slide_id.get(qn("r:id"))
+        prs.part.drop_rel(r_id)
+        slide_id_list.remove(slide_id)
+    prs.save(out_path)
+    return out_path
+
+
 # --- entry point -------------------------------------------------------
 
 

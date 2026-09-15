@@ -32,7 +32,15 @@ python qrack.py cluster.pdf --label "Row 3 / Rack 12"
 python qrack.py cluster.pdf --list-stats    # list this report's stat keys, no slide
 python qrack.py cluster.pdf --hide-stat iops --hide-stat encoding
 python qrack.py cluster.pdf --template corp-deck.pptx  # append to an existing deck, match its theme colors
+python derive_template.py corp-deck.pptx               # -> corp-deck.template.pptx, no slides, same theme
 ```
+
+If you just want the rack slide styled like your company deck -- not literally
+inserted into it -- run `derive_template.py` once to strip that deck down to
+its theme/layouts (no slides, so it's small), and pass *that* file as
+`--template` instead. Every `qrack.py` render then produces a single-slide
+`.pptx` with the matching colors, rather than your whole original deck plus
+one slide.
 
 Dependencies: `pip install pdfplumber python-pptx`.
 
