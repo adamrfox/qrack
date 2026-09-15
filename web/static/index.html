@@ -1,0 +1,403 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>qrack &mdash; sizing PDF to rack slide</title>
+<style>
+  :root {
+    --accent: #0a64a0;
+    --accent-dark: #084f80;
+    --bg: #f4f6f8;
+    --card: #ffffff;
+    --border: #dde2e7;
+    --text: #141a1f;
+    --muted: #5a6472;
+    --new: #2e8b57;
+    --danger: #b3261e;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+  }
+  header {
+    background: var(--accent);
+    color: #fff;
+    padding: 1.1rem 1.5rem;
+  }
+  header h1 { margin: 0; font-size: 1.25rem; }
+  header p { margin: 0.2rem 0 0; font-size: 0.85rem; opacity: 0.85; }
+  main {
+    max-width: 760px;
+    margin: 1.5rem auto 3rem;
+    padding: 0 1rem;
+  }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1.25rem;
+    margin-bottom: 1.25rem;
+  }
+  .dropzone {
+    border: 2px dashed var(--border);
+    border-radius: 10px;
+    padding: 2.5rem 1rem;
+    text-align: center;
+    color: var(--muted);
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+  }
+  .dropzone.drag { border-color: var(--accent); background: #eef5fb; }
+  .dropzone input { display: none; }
+  button {
+    font: inherit;
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: 6px;
+    padding: 0.55rem 1.1rem;
+    cursor: pointer;
+  }
+  button:hover { background: var(--accent-dark); }
+  button:disabled { background: #a9b4bd; cursor: default; }
+  button.secondary { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
+  button.secondary:hover { background: #eef5fb; }
+  h2 { font-size: 1.05rem; margin: 0 0 0.75rem; }
+  .row { display: flex; justify-content: space-between; padding: 0.3rem 0; font-size: 0.92rem; }
+  .row .label { color: var(--muted); }
+  .row .value { font-weight: 600; }
+  .banner {
+    background: #fff6e5;
+    border: 1px solid #f0cf7a;
+    border-radius: 8px;
+    padding: 0.7rem 0.9rem;
+    font-size: 0.88rem;
+    margin-bottom: 1rem;
+  }
+  .error {
+    background: #fdecea;
+    border: 1px solid #f3b8b3;
+    color: var(--danger);
+    border-radius: 8px;
+    padding: 0.7rem 0.9rem;
+    font-size: 0.9rem;
+    margin-bottom: 1rem;
+  }
+  table.models { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+  table.models th, table.models td { text-align: left; padding: 0.4rem 0.3rem; border-bottom: 1px solid var(--border); }
+  table.models th { color: var(--muted); font-weight: 600; font-size: 0.8rem; text-transform: uppercase; }
+  table.models input[type="number"] {
+    width: 4.5rem; padding: 0.25rem 0.4rem; border: 1px solid var(--border); border-radius: 4px; font: inherit;
+  }
+  .new-tag { color: var(--new); font-weight: 600; font-size: 0.78rem; }
+  .stats-picker { display: flex; flex-wrap: wrap; gap: 1.25rem; margin-top: 0.5rem; }
+  .stats-picker .section { min-width: 160px; }
+  .stats-picker .section h3 {
+    font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.02em;
+    color: var(--muted); margin: 0 0 0.4rem;
+  }
+  .stats-picker label {
+    display: flex; align-items: center; gap: 0.4rem; font-size: 0.88rem;
+    padding: 0.15rem 0; cursor: pointer; font-weight: normal;
+  }
+  .stats-picker input[type="checkbox"] { margin: 0; }
+  .stats-picker-actions { margin-top: 0.5rem; }
+  .stats-picker-actions button {
+    background: none; border: none; color: var(--accent); font-size: 0.82rem;
+    padding: 0; cursor: pointer; text-decoration: underline;
+  }
+  label.field { display: block; font-size: 0.85rem; color: var(--muted); margin-bottom: 0.3rem; }
+  input[type="text"] {
+    width: 100%; padding: 0.5rem 0.6rem; border: 1px solid var(--border); border-radius: 6px; font: inherit;
+  }
+  .actions { display: flex; gap: 0.6rem; margin-top: 1rem; }
+  .spinner {
+    display: inline-block; width: 0.9rem; height: 0.9rem; border: 2px solid #fff;
+    border-top-color: transparent; border-radius: 50%; animation: spin 0.7s linear infinite; margin-right: 0.4rem;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>qrack</h1>
+  <p>Qumulo sizing PDF &rarr; editable rack-elevation slide (.pptx, opens in PowerPoint &amp; Google Slides)</p>
+</header>
+
+<main>
+  <div class="card" id="upload-card">
+    <h2>1. Upload a sizing report</h2>
+    <div class="dropzone" id="dropzone">
+      <div id="dropzone-text">Drop a sizing.qumulo.com PDF here, or click to choose a file</div>
+      <input type="file" id="file-input" accept="application/pdf">
+    </div>
+  </div>
+
+  <div id="error" class="error" hidden></div>
+
+  <div class="card" id="confirm-card" hidden>
+    <h2 id="report-title">&nbsp;</h2>
+    <div class="row"><span class="label" id="report-subtitle"></span></div>
+
+    <div id="expansion-banner" class="banner" hidden>
+      This is an expansion report. Qumulo's sizing PDF doesn't say definitively which
+      model was added &mdash; qrack guessed from the report's internal document name.
+      <strong>Check the &ldquo;New&rdquo; counts below</strong> and correct them if wrong.
+    </div>
+
+    <table class="models">
+      <thead>
+        <tr><th>Model</th><th>Description</th><th>Count</th><th>New</th></tr>
+      </thead>
+      <tbody id="models-body"></tbody>
+    </table>
+
+    <div style="margin-top:1.25rem">
+      <label class="field">Stats to include</label>
+      <div class="stats-picker" id="stats-picker"></div>
+      <div class="stats-picker-actions">
+        <button type="button" id="stats-all-btn">Select all</button> &middot;
+        <button type="button" id="stats-none-btn">Select none</button>
+      </div>
+    </div>
+
+    <div style="margin-top:1rem">
+      <label class="field" for="rack-label">Rack label (optional)</label>
+      <input type="text" id="rack-label" placeholder="e.g. Row 3 / Rack 12">
+    </div>
+
+    <div class="actions">
+      <button id="render-btn">Generate slide</button>
+      <button class="secondary" id="reset-btn">Start over</button>
+    </div>
+  </div>
+</main>
+
+<script>
+(() => {
+  const dropzone = document.getElementById('dropzone');
+  const dropzoneText = document.getElementById('dropzone-text');
+  const fileInput = document.getElementById('file-input');
+  const errorBox = document.getElementById('error');
+  const confirmCard = document.getElementById('confirm-card');
+  const uploadCard = document.getElementById('upload-card');
+  const expansionBanner = document.getElementById('expansion-banner');
+  const modelsBody = document.getElementById('models-body');
+  const statsPicker = document.getElementById('stats-picker');
+  const statsAllBtn = document.getElementById('stats-all-btn');
+  const statsNoneBtn = document.getElementById('stats-none-btn');
+  const rackLabelInput = document.getElementById('rack-label');
+  const renderBtn = document.getElementById('render-btn');
+  const resetBtn = document.getElementById('reset-btn');
+
+  let currentReport = null;
+  let currentAvailableStats = [];
+
+  function showError(msg) {
+    errorBox.textContent = msg;
+    errorBox.hidden = false;
+  }
+  function clearError() {
+    errorBox.hidden = true;
+    errorBox.textContent = '';
+  }
+
+  dropzone.addEventListener('click', () => fileInput.click());
+  ['dragenter', 'dragover'].forEach(evt =>
+    dropzone.addEventListener(evt, e => { e.preventDefault(); dropzone.classList.add('drag'); }));
+  ['dragleave', 'drop'].forEach(evt =>
+    dropzone.addEventListener(evt, e => { e.preventDefault(); dropzone.classList.remove('drag'); }));
+  dropzone.addEventListener('drop', e => {
+    const f = e.dataTransfer.files[0];
+    if (f) uploadFile(f);
+  });
+  fileInput.addEventListener('change', () => {
+    if (fileInput.files[0]) uploadFile(fileInput.files[0]);
+  });
+
+  async function uploadFile(file) {
+    clearError();
+    confirmCard.hidden = true;
+    dropzoneText.innerHTML = '<span class="spinner" style="border-color:#5a6472;border-top-color:transparent"></span>Parsing ' + file.name + '&hellip;';
+
+    const form = new FormData();
+    form.append('file', file);
+    try {
+      const resp = await fetch('/api/parse', { method: 'POST', body: form });
+      const body = await resp.json();
+      if (!resp.ok) throw new Error(body.detail || ('HTTP ' + resp.status));
+      currentReport = body.report;
+      currentAvailableStats = body.available_stats || [];
+      renderConfirm(currentReport);
+    } catch (err) {
+      showError('Could not parse this PDF: ' + err.message);
+    } finally {
+      dropzoneText.textContent = 'Drop a sizing.qumulo.com PDF here, or click to choose a file';
+      fileInput.value = '';
+    }
+  }
+
+  function fmtNum(v, unit) {
+    if (v === null || v === undefined) return '—';
+    return (typeof v === 'number' ? v.toLocaleString() : v) + (unit || '');
+  }
+
+  function renderConfirm(report) {
+    document.getElementById('report-title').textContent = report.title || 'Qumulo Cluster';
+    const nodeSummary = report.is_expansion
+      ? `${(report.node_count || 0) - (report.added_nodes || 0)} existing + ${report.added_nodes || 0} new nodes`
+      : `${report.node_count ?? '?'} nodes`;
+    document.getElementById('report-subtitle').textContent =
+      `${nodeSummary} • ${fmtNum(report.usable_tb, ' TB usable')}`;
+
+    expansionBanner.hidden = !report.is_expansion;
+
+    modelsBody.innerHTML = '';
+    report.models.forEach((m, i) => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td><strong>${m.code}</strong></td>
+        <td>${m.description || ''}</td>
+        <td>${m.count}</td>
+        <td>
+          <input type="number" min="0" max="${m.count}" value="${m.new_count || 0}" data-idx="${i}">
+          ${m.is_new ? '<div class="new-tag">guessed new</div>' : ''}
+        </td>`;
+      modelsBody.appendChild(tr);
+    });
+
+    renderStatsPicker();
+
+    rackLabelInput.value = '';
+    uploadCard.hidden = false;
+    confirmCard.hidden = false;
+  }
+
+  // Remembers which stats the user unchecked, per browser -- no login, no
+  // server-side state. Stored as "hidden" rather than "visible" keys so a
+  // stat added later (e.g. a new catch-all "Other" entry) defaults to
+  // shown instead of silently missing until the user notices and re-checks
+  // it.
+  const STATS_STORAGE_KEY = 'qrack.hiddenStats';
+
+  function loadHiddenStats() {
+    try {
+      const raw = localStorage.getItem(STATS_STORAGE_KEY);
+      return raw ? new Set(JSON.parse(raw)) : new Set();
+    } catch {
+      return new Set(); // private browsing / storage disabled -- just default to "show everything"
+    }
+  }
+
+  function saveHiddenStats() {
+    try {
+      const hidden = Array.from(statsPicker.querySelectorAll('input[type="checkbox"]:not(:checked)'))
+        .map(cb => cb.dataset.statKey);
+      localStorage.setItem(STATS_STORAGE_KEY, JSON.stringify(hidden));
+    } catch {
+      // ignore -- preference just won't persist this session
+    }
+  }
+
+  function renderStatsPicker() {
+    const bySection = new Map();
+    currentAvailableStats.forEach(s => {
+      if (!bySection.has(s.section)) bySection.set(s.section, []);
+      bySection.get(s.section).push(s);
+    });
+
+    const hidden = loadHiddenStats();
+    statsPicker.innerHTML = '';
+    bySection.forEach((stats, section) => {
+      const div = document.createElement('div');
+      div.className = 'section';
+      const items = stats.map(s => `
+        <label>
+          <input type="checkbox" ${hidden.has(s.key) ? '' : 'checked'} data-stat-key="${s.key}">
+          ${s.label}
+        </label>`).join('');
+      div.innerHTML = `<h3>${section}</h3>${items}`;
+      statsPicker.appendChild(div);
+    });
+  }
+
+  statsPicker.addEventListener('change', e => {
+    if (e.target.matches('input[type="checkbox"]')) saveHiddenStats();
+  });
+  statsAllBtn.addEventListener('click', () => {
+    statsPicker.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.checked = true);
+    saveHiddenStats();
+  });
+  statsNoneBtn.addEventListener('click', () => {
+    statsPicker.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.checked = false);
+    saveHiddenStats();
+  });
+
+  resetBtn.addEventListener('click', () => {
+    currentReport = null;
+    currentAvailableStats = [];
+    confirmCard.hidden = true;
+    clearError();
+  });
+
+  renderBtn.addEventListener('click', async () => {
+    if (!currentReport) return;
+    clearError();
+
+    const inputs = modelsBody.querySelectorAll('input[data-idx]');
+    inputs.forEach(inp => {
+      const idx = Number(inp.dataset.idx);
+      const n = Math.max(0, Math.min(Number(inp.value) || 0, currentReport.models[idx].count));
+      currentReport.models[idx].new_count = n;
+      currentReport.models[idx].is_new = n > 0;
+    });
+
+    const visibleStats = Array.from(statsPicker.querySelectorAll('input[type="checkbox"]:checked'))
+      .map(cb => cb.dataset.statKey);
+
+    renderBtn.disabled = true;
+    renderBtn.innerHTML = '<span class="spinner"></span>Generating&hellip;';
+    try {
+      const resp = await fetch('/api/render', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          report: currentReport,
+          rack_label: rackLabelInput.value || null,
+          visible_stats: visibleStats,
+        }),
+      });
+      if (!resp.ok) {
+        const body = await resp.json().catch(() => ({}));
+        throw new Error(body.detail || ('HTTP ' + resp.status));
+      }
+      const blob = await resp.blob();
+      const disposition = resp.headers.get('Content-Disposition') || '';
+      const match = disposition.match(/filename="?([^"]+)"?/);
+      const filename = match ? match[1] : 'rack.pptx';
+
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      showError('Could not generate the slide: ' + err.message);
+    } finally {
+      renderBtn.disabled = false;
+      renderBtn.textContent = 'Generate slide';
+    }
+  });
+})();
+</script>
+</body>
+</html>

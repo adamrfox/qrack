@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.pptx
+.venv/
+*.egg-info/
+certs/
+samples/

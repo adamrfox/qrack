@@ -1,0 +1,9 @@
+.git
+__pycache__
+*.pyc
+*.pptx
+samples/
+.venv
+README.md
+CLAUDE.md
+certs/
