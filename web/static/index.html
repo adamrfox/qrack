@@ -186,6 +186,7 @@
         <label for="template-slide" class="hint" style="margin:0; white-space:nowrap;">Match slide # (optional):</label>
         <input type="number" id="template-slide" min="1" placeholder="auto"
                style="width:4.5rem; padding:0.3rem 0.4rem; border:1px solid var(--border); border-radius:4px; font:inherit;">
+        <span id="template-slide-status" class="hint" hidden></span>
       </div>
       <div class="template-row">
         <button type="button" class="secondary" id="template-btn">Choose file&hellip;</button>
@@ -236,6 +237,7 @@
   const templateClearBtn = document.getElementById('template-clear-btn');
   const templateStyleOnlyCheckbox = document.getElementById('template-style-only');
   const templateSlideInput = document.getElementById('template-slide');
+  const templateSlideStatus = document.getElementById('template-slide-status');
   const previewBtn = document.getElementById('preview-btn');
   const previewCard = document.getElementById('preview-card');
   const previewImg = document.getElementById('preview-img');
@@ -463,6 +465,7 @@
     templateInput.value = '';
     if (!file) return;
     clearError();
+    setTemplateSlideStatus('');
     const styleOnly = templateStyleOnlyCheckbox.checked;
     const slideIndex = getRequestedTemplateSlide();
     await withButtonBusy(templateBtn, styleOnly ? 'Distilling…' : 'Reading…', async () => {
@@ -499,6 +502,7 @@
     currentTemplateIsRaw = false;
     currentTemplateSlide = null;
     updateTemplateUi();
+    setTemplateSlideStatus('');
     saveStoredTemplate();
     scheduleAutoPreview();
   });
@@ -509,14 +513,40 @@
   // is spent the moment /api/derive-template strips the deck down to
   // nothing, and changing this field only takes effect on the *next* file
   // chosen (see the hint text below the picker).
+  function setTemplateSlideStatus(msg) {
+    templateSlideStatus.textContent = msg || '';
+    templateSlideStatus.hidden = !msg;
+  }
+
   templateSlideInput.addEventListener('input', () => {
-    if (!currentTemplateIsRaw || !currentTemplateBase64) return;
+    if (!currentTemplateBase64) {
+      setTemplateSlideStatus('');
+      return;
+    }
+    if (!currentTemplateIsRaw) {
+      // Style-only already spent its slide choice distilling the current
+      // template -- there are no slides left for anything to re-sample,
+      // so this only matters for the *next* file chosen. Say so
+      // explicitly; there's otherwise no feedback at all here, which
+      // reads as "broken" rather than "not applicable yet."
+      setTemplateSlideStatus('Applies next time you choose a template file (this one’s already distilled).');
+      return;
+    }
     currentTemplateSlide = getRequestedTemplateSlide();
     currentTemplateName = currentTemplateName.replace(/ \[slide \d+\]$/, '')
       + (currentTemplateSlide ? ` [slide ${currentTemplateSlide}]` : '');
     templateName.textContent = currentTemplateName;
     saveStoredTemplate();
-    scheduleAutoPreview();
+    if (previewCard.hidden) {
+      setTemplateSlideStatus('Will apply once you click Preview.');
+      return;
+    }
+    setTemplateSlideStatus('Updating preview…');
+    scheduleAutoPreview((ok, err) => {
+      setTemplateSlideStatus(ok
+        ? (currentTemplateSlide ? `Preview updated for slide ${currentTemplateSlide}.` : 'Preview updated to match the whole deck.')
+        : 'Update failed: ' + (err ? err.message : 'unknown error'));
+    });
   });
 
   loadStoredTemplate();
@@ -562,7 +592,10 @@
   modelsBody.addEventListener('input', e => {
     if (e.target.matches('input[data-idx]')) scheduleAutoPreview();
   });
-  rackLabelInput.addEventListener('input', scheduleAutoPreview);
+  // Wrapped, not passed bare -- addEventListener would otherwise call this
+  // with the Event object as scheduleAutoPreview's first argument
+  // (onSettled), which it very much is not.
+  rackLabelInput.addEventListener('input', () => scheduleAutoPreview());
 
   resetBtn.addEventListener('click', () => {
     currentReport = null;
@@ -645,9 +678,17 @@
   // Once a preview is already showing, re-render it automatically after
   // the user changes a new-node count, a stat selection, or the rack
   // label -- debounced so a flurry of edits (or typing in the label
-  // field) doesn't fire a render per keystroke.
-  function scheduleAutoPreview() {
-    if (previewCard.hidden || !currentReport) return;
+  // field) doesn't fire a render per keystroke. `onSettled(ok, err)`,
+  // when given, fires once this specific call's debounced fetch finishes
+  // (or is skipped) -- callers that need to confirm "yes, that took
+  // effect" beyond the shared previewStatus text use it (see the
+  // template-slide field, easy to miss since it's not next to the
+  // preview itself).
+  function scheduleAutoPreview(onSettled) {
+    if (previewCard.hidden || !currentReport) {
+      if (onSettled) onSettled(false, new Error('no preview shown yet'));
+      return;
+    }
     clearTimeout(autoPreviewTimer);
     autoPreviewTimer = setTimeout(async () => {
       previewStatus.textContent = 'Updating…';
@@ -655,8 +696,10 @@
       try {
         await fetchAndShowPreview();
         previewStatus.hidden = true;
+        if (onSettled) onSettled(true);
       } catch (err) {
         previewStatus.textContent = 'Update failed: ' + err.message;
+        if (onSettled) onSettled(false, err);
       }
     }, 600);
   }

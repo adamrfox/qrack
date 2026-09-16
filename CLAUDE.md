@@ -374,6 +374,24 @@ number depends on the checkbox:
   updates `currentTemplateSlide` and fires the debounced auto-preview live,
   no re-upload needed, once a preview is already showing.
 
+  An edit to this field is otherwise invisible — no page motion, and the
+  preview card it eventually updates can be well below the fold — so a
+  dedicated `#template-slide-status` span next to the field gives an
+  immediate, mode-aware confirmation on every `input` event: the
+  "applies next time" explanation in style-only mode, "will apply once
+  you click Preview" if no preview has been shown yet, an immediate
+  "Updating preview…" otherwise, and a final "Preview updated for slide N"
+  once it lands (or the failure message, if it didn't). That confirmation
+  comes from `scheduleAutoPreview()`'s optional `onSettled(ok, err)`
+  callback, added for exactly this — **never pass `scheduleAutoPreview`
+  itself as a bare event listener** (`el.addEventListener('input',
+  scheduleAutoPreview)`) now that it takes a parameter: the DOM would call
+  it with the `Event` object as `onSettled`, and it crashes the instant
+  that branch tries to invoke a non-function. Wrap it
+  (`() => scheduleAutoPreview()`) at every call site, as the existing ones
+  already do — caught by the jsdom regression suite (`test3.js`) the one
+  time this slipped through here.
+
 `ClusterReport.from_dict()` / `NodeModel.from_dict()` (parser.py) rebuild the
 dataclasses from that edited JSON; `parse_report(source, *, name=None)`
 accepts a path or a file-like object, and `name` (when given) always wins for
