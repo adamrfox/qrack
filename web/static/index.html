@@ -245,6 +245,10 @@
   function showError(msg) {
     errorBox.textContent = msg;
     errorBox.hidden = false;
+    // The error box sits near the top of the page; if the user's scrolled
+    // down (e.g. filling in the template picker further down), a silently
+    // appearing banner off-screen is as good as no error at all.
+    errorBox.scrollIntoView?.({ behavior: 'smooth', block: 'center' });
   }
   function clearError() {
     errorBox.hidden = true;

@@ -30,7 +30,7 @@ from qumulo_rack.parser import ClusterReport, parse_report
 from qumulo_rack.renderer import available_stats, derive_template, render_rack
 
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # 20 MB -- sizing reports are a few hundred KB
-MAX_TEMPLATE_BYTES = 15 * 1024 * 1024  # 15 MB -- a branded deck with embedded images/logos
+MAX_TEMPLATE_BYTES = 80 * 1024 * 1024  # 80 MB -- a real internal Qumulo template ran ~40MB with embedded video/images
 PARSE_TIMEOUT_SECONDS = 20
 PREVIEW_TIMEOUT_SECONDS = 25
 PREVIEW_WIDTH_PX = 2400
