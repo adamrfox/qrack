@@ -62,7 +62,7 @@ class RenderRequest(BaseModel):
         None, description="1-based slide number in the template to sample colors from instead of the whole deck. Only meaningful alongside a template_base64 that still has its original slides."
     )
     rack_sizes: list[int] | None = Field(
-        None, description="Explicit node count per rack (must sum to the report's total node count). Omit to auto-split by RU whenever the cluster needs more than one rack; up to 2 racks are supported on one slide."
+        None, description="Explicit node count per rack (must sum to the report's total node count). Omit to auto-split by RU whenever the cluster needs more than one rack; up to 2 racks share one slide, more spill onto additional slides with the aggregated stats on a dedicated final slide."
     )
 
 
@@ -233,8 +233,11 @@ def api_preview(req: RenderRequest):
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         pptx_path = os.path.join(tmp_dir, "slide.pptx")
+        template_slide_count = 0
         try:
             with _resolve_template(req.template_base64) as template_path:
+                if template_path is not None:
+                    template_slide_count = len(Presentation(template_path).slides)
                 render_rack(report, pptx_path, rack_label=req.rack_label or None,
                             visible_stats=req.visible_stats, template_path=template_path,
                             template_slide=req.template_slide, rack_sizes=req.rack_sizes)
@@ -247,12 +250,18 @@ def api_preview(req: RenderRequest):
                 raise HTTPException(422, f"Couldn't use that template: {exc}") from exc
             raise
 
-        # Our slide is always the last one in the deck (appended after any
-        # template slides). soffice's PNG export only ever renders slide 1 of
-        # a multi-slide deck with no way to target another one, so we convert
-        # to PDF (which renders every page) and then extract the one page we
-        # want with pdftoppm.
-        target_page = len(Presentation(pptx_path).slides)
+        # Our slide(s) are always appended after any template slides, so
+        # the first one we added is at this fixed position regardless of
+        # how many we ended up adding (1, for the common case; more for a
+        # cluster split across multiple slides -- see render_rack's
+        # rack_groups). Deliberately the *first* of ours, not the last: a
+        # multi-slide render's last slide is the aggregated stats slide,
+        # but the rack diagrams -- the part actually worth a visual sanity
+        # check -- are the earlier ones. soffice's PNG export only ever
+        # renders slide 1 of a multi-slide deck with no way to target
+        # another one, so we convert to PDF (which renders every page) and
+        # then extract the one page we want with pdftoppm.
+        target_page = template_slide_count + 1
 
         # A dedicated profile dir per request avoids soffice's user-profile
         # lock contention under concurrent preview requests.

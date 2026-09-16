@@ -197,11 +197,46 @@ Unparsed fields come back `None` rather than raising — callers must handle tha
     `base_label` was itself already rack-specific (e.g. "Row 3 / Rack 12"
     from single-rack usage), but a free-text single label can't
     unambiguously name multiple racks without the user splitting it
-    themselves.
-  - More than 2 racks isn't supported yet — `_rack_geometry` raises a
-    clean `ValueError` naming how many racks the report actually needs.
-    Splitting across additional *slides* (with the aggregated stats moved
-    to its own slide) is the natural next step; see "Not yet built."
+    themselves. At the narrower 2-up `rack_w`, this longer combined label
+    can itself be too wide for one line at the normal size — same problem
+    as the switch labels above, just caught later because it only bites
+    with a longer `base_label` than the "Rack 1"/"Rack 2" defaults used
+    while first building this feature. `_draw_rack` drops to a smaller
+    font and widens/bottom-anchors the label box whenever `rack_w <
+    RACK_W`, so a wrapped second line grows up into the gap under the
+    header instead of down into the switch frame.
+  - `_rack_geometry` itself only ever has two presets — 1-up (unscaled,
+    the original single-rack constants) and 2-up (`RACK_W_2UP` etc.) — and
+    raises a clean `ValueError` for any other count; **more than 2 racks
+    is handled one level up, in `render_rack`, by repeating the 2-up
+    preset across additional slides** rather than teaching `_rack_geometry`
+    a third size:
+    - `render_rack` chunks `_split_into_racks`'s result into groups of ≤2
+      racks (`rack_groups`) and calls `_draw_rack`/`_draw_legend` once per
+      group on its own new slide, always requesting `_rack_geometry(2)`
+      for every rack-only slide once there's more than one group —
+      including a trailing group with only 1 rack — so every rack-only
+      slide in a multi-slide deck looks visually consistent rather than
+      having the last one suddenly render at the wider 1-up scale.
+    - Because the stats panel no longer has to compete with rack columns
+      for width once there's more than one slide, the aggregated stats
+      (still whole-cluster, matching the source report) move to one
+      dedicated, additional final slide instead of squeezing into
+      `compact`/single-column form next to the last rack group —
+      `allow_pair=True, compact=False` there (the original spacious
+      layout), using the slide's full width margin-to-margin.
+    - Each rack slide's subtitle gets a page-context suffix —
+      `"Racks {start}–{end} of {total}"`, or `"Rack {n} of {total}"` when
+      a trailing group has only one rack (avoids the awkward
+      "Racks 3–3 of 3") — and the stats slide's is just `"Stats"`; omitted
+      entirely for the common single-slide case, so a report that fits in
+      one or two racks renders byte-for-byte the same subtitle as before
+      this feature existed.
+    - Background/text/accent colors and the muted-text blend are all
+      computed once, outside this loop, from the template (or defaults),
+      and threaded into every slide the same way — a multi-slide render
+      against a template looks like the same deck throughout, not a style
+      shift partway through.
 - `_sample_deck_colors(prs) -> dict` returns up to
   `{'background':, 'text':, 'accent':}` as `RGBColor`, sourced from a
   template's *real* slides, not its theme scheme:
@@ -463,17 +498,28 @@ JS:
   out-of-range `template_slide` comes back as a `422` with
   `_sample_deck_colors`'s own `ValueError` message.
   - **`/api/preview`'s rasterization is a two-step pipeline, not a single
-    `soffice --convert-to png`:** our rack slide is always the *last* slide
-    in the deck (appended after any template slides), but `soffice`'s PNG
-    export filter only ever rasterizes slide/page 1 of a multi-page
-    conversion — there's no filter option to target another page. So preview
-    converts to PDF first (which renders every page), then uses
-    `pdftoppm -png -r 180 -f N -l N -singlefile` to pull out page `N =
-    len(Presentation(pptx_path).slides)` specifically. 180 DPI on the fixed
+    `soffice --convert-to png`:** `soffice`'s PNG export filter only ever
+    rasterizes slide/page 1 of a multi-page conversion — there's no filter
+    option to target another page. So preview converts to PDF first (which
+    renders every page), then uses `pdftoppm -png -r 180 -f N -l N
+    -singlefile` to pull out page `N` specifically. 180 DPI on the fixed
     13.333"×7.5" slide is what yields exactly `PREVIEW_WIDTH_PX` ×
-    `PREVIEW_HEIGHT_PX` (2400×1350). This runs unconditionally (not just
-    when a template is given) for simplicity — it happens to be a no-op
-    difference when there's no template, since page 1 already is our slide.
+    `PREVIEW_HEIGHT_PX` (2400×1350).
+  - `N` is `template_slide_count + 1` — the *first* of our own slides, not
+    the deck's last — where `template_slide_count` is read from the
+    template file itself (`len(Presentation(template_path).slides)`,
+    before `render_rack` appends anything) and is `0` with no template.
+    This used to just be `len(Presentation(pptx_path).slides)` (the whole
+    deck's last slide), which was equivalent back when `render_rack` only
+    ever appended exactly one slide — but a multi-rack cluster can now add
+    several (see "Multi-rack layout" above), and its *last* one is the
+    dedicated stats slide. Targeting the last slide would silently preview
+    only the stats panel for exactly the reports where a visual sanity
+    check of the rack diagram matters most, so this deliberately targets
+    the first rack slide instead. Runs unconditionally (not just when a
+    template is given) for simplicity — it happens to be a no-op
+    difference for a single-slide, no-template render, since page 1
+    already is our slide.
 
 The UI shows the parsed config, lets the user fix the highlighted-as-new
 selection (and optionally the rack label, stat selection, rack split, and a
@@ -627,12 +673,6 @@ Implementation notes (current state):
 
 ## Not yet built (good next tasks, roughly in order)
 
-- More than 2 racks: currently `render_rack`/`_rack_geometry` raise a clean
-  `ValueError` past 2 (see the "Multi-rack layout" section above) --
-  spilling extra racks onto additional slides, with the aggregated stats
-  panel moved to its own slide, is the natural next step, matching the
-  design agreed on before this was built (2 racks share one slide; 3+
-  splits across slides with stats separated out).
 - Back-end switch pair when `backend_ports > 0`.
 - Auth, if the web app ever needs to leave a trusted network (currently none
   by design — see the "Docker shape" decision in project history).

@@ -400,9 +400,10 @@ def _rack_geometry(num_racks: int) -> dict:
     `NODE_LABEL_W`/`STATS_X`/`STATS_W`) -- untouched, unscaled. 2 racks
     share the narrower `*_2UP` constants on both columns, leaving the
     stats panel one (rather than side-by-side) column of cards' worth of
-    width. Anything beyond 2 doesn't fit on one slide at any legible
-    scale -- that's a separate, not-yet-built multi-slide feature (see
-    CLAUDE.md)."""
+    width. `render_rack` never asks this for more than 2 -- a cluster
+    needing more just repeats a 2-up slide (see `render_rack`'s
+    `rack_groups`) rather than a third geometry preset; a direct call
+    past 2 raises, since there's no matching layout to hand back."""
     if num_racks == 1:
         return {"rack_x": [RACK_X], "rack_w": RACK_W, "label_w": NODE_LABEL_W,
                 "stats_x": STATS_X, "stats_w": STATS_W}
@@ -413,7 +414,7 @@ def _rack_geometry(num_racks: int) -> dict:
         stats_w = SLIDE_W - stats_x - STATS_RIGHT_MARGIN
         return {"rack_x": [rack_x0, rack_x1], "rack_w": RACK_W_2UP, "label_w": NODE_LABEL_W_2UP,
                 "stats_x": stats_x, "stats_w": stats_w}
-    raise ValueError(f"this report needs {num_racks} racks; more than 2 on one slide isn't supported yet")
+    raise ValueError(f"_rack_geometry only supports 1 or 2 racks per slide, got {num_racks}")
 
 
 def _rack_labels(base_label: str | None, num_racks: int) -> list[str]:
@@ -593,10 +594,21 @@ def _draw_rack(slide, seq: list, rack_label: str, rack_x, rack_w, label_w, label
     frame_bottom_y = RACK_Y + frame_h
     nodes_top_y = frame_bottom_y - ru_height * total_ru  # bottom-align the node stack
 
-    _text(
-        slide, rack_x, RACK_Y - Inches(0.32), rack_w, Inches(0.28),
-        rack_label, Pt(15), label_text, bold=True,
-    )
+    # A long rack_label (e.g. "Row 3 / Rack 12") plus the "— Rack N" suffix
+    # _rack_labels adds for a multi-rack cluster can be too wide for the
+    # narrower 2-up column to fit on one line at the normal size -- same
+    # problem as the switch labels above, just discovered later because it
+    # only bites with a longer label than the "Rack 1"/"Rack 2" defaults
+    # used while testing that feature. Shrink the font and, since it may
+    # still wrap to two lines, widen the box and anchor it to the bottom
+    # so a second line grows up into the gap under the header instead of
+    # down into the switch frame.
+    if rack_w >= RACK_W:
+        _text(slide, rack_x, RACK_Y - Inches(0.32), rack_w, Inches(0.28),
+              rack_label, Pt(15), label_text, bold=True)
+    else:
+        _text(slide, rack_x, RACK_Y - Inches(0.38), rack_w, Inches(0.34),
+              rack_label, Pt(11), label_text, bold=True, anchor=MSO_ANCHOR.BOTTOM)
 
     _rect(slide, rack_x - Inches(0.06), RACK_Y - Inches(0.06), rack_w + Inches(0.12),
           frame_h + Inches(0.12), fill=None, line=RACK_FRAME, line_w=Pt(1.5))
@@ -1248,12 +1260,15 @@ def render_rack(report: ClusterReport, out_path: str, rack_label: str | None = N
     `_split_into_racks`); omit it to auto-split by RU whenever the cluster
     needs more than one rack (unchanged, exactly one rack, for the common
     case that doesn't). Up to 2 racks share one slide, scaled down (see
-    `_rack_geometry`) to leave room for the stats panel, which always
-    covers the *whole* cluster regardless of how many racks it's split
-    across -- matching the source report, which never gives a per-rack
-    breakdown either. More than 2 racks isn't supported yet (raises
-    `ValueError`) -- that needs spilling onto additional slides, a
-    separate not-yet-built piece (see CLAUDE.md).
+    `_rack_geometry`) to leave room for the stats panel alongside them.
+    More than 2 racks spills onto additional slides -- 2 racks per slide,
+    stats moved to one final dedicated slide (spacious, full width, since
+    nothing else needs that slide's space) covering the *whole* cluster
+    regardless of how many racks it's split across, matching the source
+    report, which never gives a per-rack breakdown either. Every rack-only
+    slide in a multi-slide deck uses the same (narrower, 2-up) geometry
+    for visual consistency across the deck, even a trailing slide with
+    just one rack left over.
 
     `template_path`, when given, is an existing .pptx: our rack slide is
     appended after any slides it already has, using a heuristically-chosen
@@ -1287,21 +1302,6 @@ def render_rack(report: ClusterReport, out_path: str, rack_label: str | None = N
     prs.slide_height = SLIDE_H
 
     layout = _find_blank_layout(prs)
-    slide = prs.slides.add_slide(layout)
-
-    # add_slide() clones the layout's own placeholders (title/subtitle/body/
-    # etc.) onto the new slide -- normal python-pptx behavior, meant for
-    # someone who's about to type into them. We never do that; every field
-    # on this slide is our own explicit shape. On a template whose only
-    # "blank-ish" layout still carries a few content placeholders (common
-    # on real branded decks -- unlike python-pptx's own default template,
-    # which has a true zero-placeholder "Blank" layout), those inherited
-    # placeholders sit empty on top of/behind our own shapes at whatever
-    # position and styling the layout gave them, which can visibly clash.
-    # Strip them all immediately; nothing here ever reads from them.
-    for ph in list(slide.placeholders):
-        ph._element.getparent().remove(ph._element)
-
     theme = _theme_colors(layout.slide_master) if template_path else {}
     bg_color = sampled.get("background") or theme.get("lt1", SLIDE_BG)
     title_color = sampled.get("text") or theme.get("dk1", TITLE_TEXT)
@@ -1314,40 +1314,96 @@ def render_rack(report: ClusterReport, out_path: str, rack_label: str | None = N
     muted_text = _blend(title_color, bg_color, 0.35) if template_path else SUBTITLE_TEXT
     label_text = title_color if template_path else None
 
-    bg = _rect(slide, 0, 0, SLIDE_W, SLIDE_H, fill=bg_color)
-    slide.shapes._spTree.remove(bg._element)
-    slide.shapes._spTree.insert(2, bg._element)
-
     node_summary = f"{report.node_count} nodes" if report.node_count is not None else ""
     if report.is_expansion and report.added_nodes:
         node_summary = f"{(report.node_count or 0) - report.added_nodes} existing + {report.added_nodes} new nodes"
-
     title = report.title or "Qumulo Cluster"
-    _text(slide, Inches(0.55), Inches(0.28), Inches(9), Inches(0.4), title, Pt(24), title_color, bold=True)
-    subtitle_bits = [b for b in [node_summary, _fmt(report.usable_tb, " TB Usable", 2)] if b]
-    _text(slide, Inches(0.55), Inches(0.68), Inches(9), Inches(0.3), " • ".join(subtitle_bits), Pt(13), muted_text)
+    subtitle_base = " • ".join(b for b in [node_summary, _fmt(report.usable_tb, " TB Usable", 2)] if b)
+
+    def new_slide():
+        s = prs.slides.add_slide(layout)
+        # add_slide() clones the layout's own placeholders (title/subtitle/
+        # body/etc.) onto the new slide -- normal python-pptx behavior,
+        # meant for someone about to type into them. We never do that;
+        # every field on every one of our slides is our own explicit
+        # shape. On a template whose only "blank-ish" layout still carries
+        # a few content placeholders (common on real branded decks --
+        # unlike python-pptx's own default template, which has a true
+        # zero-placeholder "Blank" layout), those inherited placeholders
+        # sit empty on top of/behind our own shapes at whatever position
+        # and styling the layout gave them, which can visibly clash.
+        # Strip them all immediately; nothing here ever reads from them.
+        for ph in list(s.placeholders):
+            ph._element.getparent().remove(ph._element)
+        bg = _rect(s, 0, 0, SLIDE_W, SLIDE_H, fill=bg_color)
+        s.shapes._spTree.remove(bg._element)
+        s.shapes._spTree.insert(2, bg._element)
+        return s
+
+    def draw_header(s, subtitle_suffix=None):
+        _text(s, Inches(0.55), Inches(0.28), Inches(9), Inches(0.4), title, Pt(24), title_color, bold=True)
+        subtitle = subtitle_base + (f" • {subtitle_suffix}" if subtitle_suffix else "")
+        _text(s, Inches(0.55), Inches(0.68), Inches(9), Inches(0.3), subtitle, Pt(13), muted_text)
 
     seq_all = _node_sequence(report.models)
     racks = _split_into_racks(seq_all, rack_sizes=rack_sizes)
-    geometry = _rack_geometry(len(racks))
     labels = _rack_labels(rack_label, len(racks))
+    label_iter = iter(labels)
 
-    frame_bottom = None
-    for rack_x, rack_seq, rack_lbl in zip(geometry["rack_x"], racks, labels):
-        frame_bottom = _draw_rack(slide, rack_seq, rack_lbl, rack_x, geometry["rack_w"], geometry["label_w"],
-                                   label_text=label_text, muted_text=muted_text)
+    # 2 racks per slide, same grouping _rack_geometry already handles for
+    # a single slide -- a cluster needing more than that just repeats it
+    # across additional slides instead of a third geometry preset.
+    rack_groups = [racks[i:i + 2] for i in range(0, len(racks), 2)] or [[]]
+    multi_slide = len(rack_groups) > 1
 
-    legend_y = frame_bottom + Inches(0.18)
-    rack_bottom = _draw_legend(slide, geometry["rack_x"][0], legend_y, muted_text)
+    for gi, group in enumerate(rack_groups):
+        slide = new_slide()
+        # Every rack-only slide in a multi-slide deck shares one geometry
+        # (2-up) regardless of whether *this particular* slide has 1 or 2
+        # racks -- so a trailing odd rack doesn't suddenly render at a
+        # different physical scale than the rest of the deck. The single-
+        # slide case (not multi_slide) still sizes to its own actual rack
+        # count, exactly as before this existed.
+        geometry = _rack_geometry(2) if multi_slide else _rack_geometry(len(group))
+        suffix = None
+        if multi_slide:
+            start, end = gi * 2 + 1, gi * 2 + len(group)
+            suffix = f"Rack {start} of {len(racks)}" if start == end else f"Racks {start}–{end} of {len(racks)}"
+        draw_header(slide, suffix)
 
-    _draw_stats(slide, report, visible_stats, header_fill=header_fill,
-                stats_x=geometry["stats_x"], stats_w=geometry["stats_w"],
-                allow_pair=(len(racks) == 1), compact=(len(racks) > 1))
+        frame_bottom = None
+        for rack_x, rack_seq in zip(geometry["rack_x"], group):
+            frame_bottom = _draw_rack(slide, rack_seq, next(label_iter), rack_x, geometry["rack_w"], geometry["label_w"],
+                                       label_text=label_text, muted_text=muted_text)
+        legend_y = frame_bottom + Inches(0.18)
+        rack_bottom = _draw_legend(slide, geometry["rack_x"][0], legend_y, muted_text)
 
-    if report.source_file:
-        source_y = min(rack_bottom, SLIDE_H - Inches(0.32))
-        _text(slide, Inches(0.55), source_y, Inches(6), Inches(0.25),
-              f"Source: {report.source_file}", Pt(8), muted_text)
+        if not multi_slide:
+            # Common case: stats share this same slide, exactly as before
+            # multi-slide splitting existed.
+            _draw_stats(slide, report, visible_stats, header_fill=header_fill,
+                        stats_x=geometry["stats_x"], stats_w=geometry["stats_w"],
+                        allow_pair=(len(racks) == 1), compact=(len(racks) > 1))
+            if report.source_file:
+                source_y = min(rack_bottom, SLIDE_H - Inches(0.32))
+                _text(slide, Inches(0.55), source_y, Inches(6), Inches(0.25),
+                      f"Source: {report.source_file}", Pt(8), muted_text)
+
+    if multi_slide:
+        # One dedicated stats slide at the end, covering the whole cluster
+        # (never a per-rack breakdown -- the source report doesn't have
+        # one either). Full slide width, and the original spacious
+        # (allow_pair, non-compact) card layout, since nothing else is
+        # competing for room on this slide.
+        slide = new_slide()
+        draw_header(slide, "Stats")
+        stats_margin = Inches(0.55)
+        _draw_stats(slide, report, visible_stats, header_fill=header_fill,
+                    stats_x=stats_margin, stats_w=SLIDE_W - 2 * stats_margin,
+                    allow_pair=True, compact=False)
+        if report.source_file:
+            _text(slide, Inches(0.55), SLIDE_H - Inches(0.32), Inches(6), Inches(0.25),
+                  f"Source: {report.source_file}", Pt(8), muted_text)
 
     prs.save(out_path)
     return out_path

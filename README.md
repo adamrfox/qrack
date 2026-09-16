@@ -34,7 +34,7 @@ python qrack.py cluster.pdf --hide-stat iops --hide-stat encoding
 python qrack.py cluster.pdf --template corp-deck.pptx  # append to an existing deck, matching its real colors
 python derive_template.py corp-deck.pptx               # -> corp-deck.template.pptx, no slides, same colors
 python derive_template.py corp-deck.pptx --slide 5      # match slide 5 specifically, not the whole deck
-python qrack.py cluster.pdf --rack-sizes 15,35          # 2 racks, node counts you choose instead of auto-split
+python qrack.py cluster.pdf --rack-sizes 15,35          # node counts per rack, instead of auto-split
 ```
 
 If you just want the rack slide styled like your company deck -- not literally
@@ -52,11 +52,13 @@ either command) pins it to one specific 1-based slide instead. On
 distilled file has no slides left afterward for `qrack.py --template` to
 sample from later.
 
-A cluster too big for one 42U rack automatically splits across two, sharing
-one slide (scaled down to fit, stats panel included). `--rack-sizes` overrides
-that auto-split with your own node count per rack, e.g. `--rack-sizes 15,35`
--- the counts must add up to the report's total node count. More than 2 racks
-isn't supported yet.
+A cluster too big for one 42U rack automatically splits across racks
+(scaled down to fit). Up to 2 share one slide with the stats panel alongside
+them; 3 or more spill onto additional slides (2 racks each), with the
+aggregated stats moved to one dedicated final slide instead of squeezing
+next to the last rack group. `--rack-sizes` overrides the auto-split with
+your own node count per rack, e.g. `--rack-sizes 15,15,20` -- the counts must
+add up to the report's total node count.
 
 Dependencies: `pip install pdfplumber python-pptx`.
 
@@ -248,5 +250,7 @@ Common tweaks live in `renderer.py`:
   stacked); adapts to however many sections/rows survive filtering
 - `_node_sequence()` — node ordering (new nodes are floated to the top of
   their model group)
-- multi-rack splitting (not yet implemented) would slot in around the rack
-  loop when `total_node_ru` exceeds a rack height
+- `_split_into_racks()` / `_rack_geometry()` — multi-rack splitting: auto-fill
+  by RU vs. a manual `rack_sizes` override, and the 1-up/2-up layout presets
+  (see `CLAUDE.md`'s "Multi-rack layout" section for how 3+ racks reuse the
+  2-up preset across additional slides instead of a third preset)
