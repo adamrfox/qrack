@@ -59,6 +59,9 @@ class RenderRequest(BaseModel):
     template_slide: int | None = Field(
         None, description="1-based slide number in the template to sample colors from instead of the whole deck. Only meaningful alongside a template_base64 that still has its original slides."
     )
+    rack_sizes: list[int] | None = Field(
+        None, description="Explicit node count per rack (must sum to the report's total node count). Omit to auto-split by RU whenever the cluster needs more than one rack; up to 2 racks are supported on one slide."
+    )
 
 
 class DeriveTemplateRequest(BaseModel):
@@ -180,7 +183,7 @@ def api_render(req: RenderRequest):
         with _resolve_template(req.template_base64) as template_path:
             render_rack(report, tmp.name, rack_label=req.rack_label or None,
                         visible_stats=req.visible_stats, template_path=template_path,
-                        template_slide=req.template_slide)
+                        template_slide=req.template_slide, rack_sizes=req.rack_sizes)
     except HTTPException:
         os.unlink(tmp.name)
         raise
@@ -217,7 +220,7 @@ def api_preview(req: RenderRequest):
             with _resolve_template(req.template_base64) as template_path:
                 render_rack(report, pptx_path, rack_label=req.rack_label or None,
                             visible_stats=req.visible_stats, template_path=template_path,
-                            template_slide=req.template_slide)
+                            template_slide=req.template_slide, rack_sizes=req.rack_sizes)
         except HTTPException:
             raise
         except ValueError as exc:

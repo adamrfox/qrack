@@ -34,6 +34,7 @@ python qrack.py cluster.pdf --hide-stat iops --hide-stat encoding
 python qrack.py cluster.pdf --template corp-deck.pptx  # append to an existing deck, matching its real colors
 python derive_template.py corp-deck.pptx               # -> corp-deck.template.pptx, no slides, same colors
 python derive_template.py corp-deck.pptx --slide 5      # match slide 5 specifically, not the whole deck
+python qrack.py cluster.pdf --rack-sizes 15,35          # 2 racks, node counts you choose instead of auto-split
 ```
 
 If you just want the rack slide styled like your company deck -- not literally
@@ -50,6 +51,12 @@ either command) pins it to one specific 1-based slide instead. On
 `derive_template.py` that slide choice has to be made up front, since the
 distilled file has no slides left afterward for `qrack.py --template` to
 sample from later.
+
+A cluster too big for one 42U rack automatically splits across two, sharing
+one slide (scaled down to fit, stats panel included). `--rack-sizes` overrides
+that auto-split with your own node count per rack, e.g. `--rack-sizes 15,35`
+-- the counts must add up to the report's total node count. More than 2 racks
+isn't supported yet.
 
 Dependencies: `pip install pdfplumber python-pptx`.
 
@@ -174,7 +181,10 @@ base64-encoded, to append the rack slide to and match colors sampled from
 its real content — omit or leave `null` for the default styling), and an
 optional `template_slide` (a 1-based slide number to sample from instead of
 the whole deck — only meaningful when `template_base64` still has its
-original slides) — `/api/render` streams back the `.pptx`, `/api/preview`
+original slides), and an optional `rack_sizes: [n, n, ...]` (an explicit
+node count per rack, must sum to the report's total node count — omit or
+leave `null` to auto-split by RU whenever the cluster needs more than one
+rack) — `/api/render` streams back the `.pptx`, `/api/preview`
 streams back a PNG rendered from that exact `.pptx` via LibreOffice, so
 what you preview can't drift from what you'd download. No persistence —
 each request renders into its own temp file/directory that's deleted after

@@ -80,8 +80,8 @@ Unparsed fields come back `None` rather than raising — callers must handle tha
 
 - `render_rack(report: ClusterReport, out_path: str, rack_label: str|None=None,
   visible_stats=None, template_path: str|None=None,
-  template_slide: int|None=None) -> str` writes the `.pptx` to `out_path`
-  and returns it.
+  template_slide: int|None=None, rack_sizes: list[int]|None=None) -> str`
+  writes the `.pptx` to `out_path` and returns it.
 - Palette is module-level constants at the top of the file (node / switch /
   cable colours). Centralize any theming there.
 - Slide is fixed 13.333" × 7.5" (16:9). All shapes are native `python-pptx`
@@ -143,6 +143,65 @@ Unparsed fields come back `None` rather than raising — callers must handle tha
 - **Known limitation:** the slide is always fixed to 13.333"×7.5" (16:9), so
   a 4:3 template gets its aspect ratio silently overridden. Not worth
   handling until someone actually hits it.
+- **Multi-rack layout** (`rack_sizes`): the sizing PDF gives a cluster's
+  total node count and total rack-U, never how they're physically split
+  across racks — that's purely a rendering decision, made by
+  `_split_into_racks(seq, rack_sizes=None)`:
+  - **Auto-split** (`rack_sizes=None`, the default): fills a rack by
+    cumulative RU up to `RACK_NODE_CAPACITY_U` (`RACK_TOTAL_U` minus
+    `RACK_SWITCH_RESERVED_U` — the report's own node/rack-U numbers never
+    include the ToR switches, but they take real physical space; assumes
+    1U each, a common ToR form factor) before spilling into the next rack.
+    The overwhelmingly common case — everything fits in one rack — yields
+    exactly one, so this is a no-op for every report that predates
+    multi-rack support.
+  - **Manual override** (`rack_sizes=[n, n, ...]`): an explicit node count
+    per rack, in the same new-nodes-first order `_node_sequence` already
+    produces. Meant to be the user's edit of a previous auto-split result,
+    so it's strict: raises `ValueError` if any count is negative or the
+    counts don't sum to the report's total node count exactly, rather than
+    silently dropping nodes or absorbing a mismatch into the last rack.
+  - **Up to 2 racks share one slide** (`_rack_geometry`), scaled down on
+    both the rack frame and its label strip (`RACK_W_2UP`/
+    `NODE_LABEL_W_2UP`, vs. the single-rack `RACK_W`/`NODE_LABEL_W`) to
+    leave the stats panel a usable width. The stats panel always covers
+    the *whole* cluster regardless of rack count (matching the source
+    report, which has no per-rack breakdown either) — `_draw_stats` gets
+    `allow_pair=False` (no side-by-side top pair, and no per-card internal
+    two-column row layout either — both are the same "is there width for
+    2 side-by-side label/value groups" question) and `compact=True`
+    (tighter header height, card spacing, and row-height floor, plus a
+    smaller stat font) once there's more than one rack. Forcing every
+    card to one column of rows roughly doubles how many lines a report's
+    full stat set needs, and without `compact`'s reclaimed overhead a
+    *realistic* stat count (not even an extreme everything-selected case)
+    overflowed past the slide's bottom edge at the narrower width —
+    verified by deliberately constructing that failure before adding
+    `compact`, then confirming it's gone after.
+  - `_draw_rack` takes an explicit `seq`/`rack_x`/`rack_w`/`label_w`
+    instead of a `ClusterReport` and the module's single-rack constants,
+    so the same function draws every column regardless of how many racks
+    share the slide; it no longer draws the legend (see next). At
+    `rack_w` below the single-rack `RACK_W`, "ToR Switch A/B" at the
+    normal font wraps to two lines (the switch's own label sub-box is a
+    fixed fraction of `rack_w`) — `_draw_rack` drops to a smaller font
+    once `rack_w < RACK_W`, not tied specifically to 2-rack mode, so a
+    future narrower preset doesn't have to remember to handle this too.
+  - `_draw_legend` (New node / Switch A / Switch B) is drawn once per
+    slide, not once per rack — every rack shares the same frame height
+    (the frame always spans the fixed 42U envelope regardless of content),
+    so it doesn't matter which rack's returned frame-bottom the caller
+    measures it from.
+  - Multiple racks get labeled `"{base_label} — Rack {n}"` (or just
+    `"Rack {n}"` with no base label) via `_rack_labels` — imperfect if
+    `base_label` was itself already rack-specific (e.g. "Row 3 / Rack 12"
+    from single-rack usage), but a free-text single label can't
+    unambiguously name multiple racks without the user splitting it
+    themselves.
+  - More than 2 racks isn't supported yet — `_rack_geometry` raises a
+    clean `ValueError` naming how many racks the report actually needs.
+    Splitting across additional *slides* (with the aggregated stats moved
+    to its own slide) is the natural next step; see "Not yet built."
 - `_sample_deck_colors(prs) -> dict` returns up to
   `{'background':, 'text':, 'accent':}` as `RGBColor`, sourced from a
   template's *real* slides, not its theme scheme:
@@ -252,15 +311,20 @@ Unparsed fields come back `None` rather than raising — callers must handle tha
 ### `qrack.py` (CLI)
 
 `python qrack.py cluster.pdf [-o out.pptx] [--json] [--new CODE:N] [--label STR]
-[--hide-stat KEY] [--list-stats] [--template FILE.pptx] [--template-slide N]`
+[--hide-stat KEY] [--list-stats] [--template FILE.pptx] [--template-slide N]
+[--rack-sizes N,N,...]`
 — `--json` dumps parsed config; `--new AH-96T:2` overrides the new-node guess;
 `--template` appends the rack slide to an existing deck and picks up colors
 sampled from its real content (see `render_rack`'s `template_path` above);
 `--template-slide N` samples from just that 1-based slide instead of the
 whole deck (requires `--template`; a plain `SystemExit` if given without
-it) — a bad/missing template path, or an out-of-range `--template-slide`,
-is caught and re-raised as a clean `SystemExit`, not a raw `pptx`/`ValueError`
-traceback.
+it); `--rack-sizes 15,35` overrides the auto-split node count per rack
+(see `render_rack`'s `rack_sizes` / "Multi-rack layout" above; must sum to
+the report's total node count) — a bad/missing template path, a malformed
+`--rack-sizes` list, or a `ValueError` from `render_rack` itself (an
+out-of-range `--template-slide`, mismatched `--rack-sizes`, or a report
+needing more than 2 racks) is caught and re-raised as a clean `SystemExit`
+using that error's own message, not a raw traceback.
 
 ### `derive_template.py` (CLI)
 
@@ -358,13 +422,15 @@ distillation shouldn't require a round-trip through the CLI:
   message when it isn't a parseable Qumulo report.
 - `POST /api/render` and `POST /api/preview` take the same body — `{report`
   (possibly edited by the user), `rack_label`, `visible_stats`,
-  `template_base64`, `template_slide}` (the last two are optional — a
-  `.pptx`, base64-encoded, to append the rack slide to; `template_slide` a
-  1-based slide number to sample from instead of the whole deck, only
-  meaningful when `template_base64` still has its original slides, since
-  sampling has nothing to work with once they're stripped; omit or `null`
-  either for the default styling) — and
-  differ only in what they stream back: `/api/render` streams the `.pptx`
+  `template_base64`, `template_slide`, `rack_sizes}` (the last three are
+  optional — a `.pptx`, base64-encoded, to append the rack slide to;
+  `template_slide` a 1-based slide number to sample from instead of the
+  whole deck, only meaningful when `template_base64` still has its
+  original slides, since sampling has nothing to work with once they're
+  stripped; `rack_sizes` an explicit node count per rack, see
+  `render_rack`'s `rack_sizes` — omit or `null` any of the three for the
+  default behavior) — and differ only in what they stream back:
+  `/api/render` streams the `.pptx`
   with `Content-Disposition: attachment`; `/api/preview` renders that *same*
   `.pptx` to a PNG and streams that instead, so the preview can never drift
   from the real output the way a from-scratch HTML/CSS redraw of the layout
@@ -530,8 +596,17 @@ Implementation notes (current state):
 
 ## Not yet built (good next tasks, roughly in order)
 
-- Multi-rack splitting when `total_node_ru` exceeds one rack's height (spill
-  into a second rack column on the same slide).
+- More than 2 racks: currently `render_rack`/`_rack_geometry` raise a clean
+  `ValueError` past 2 (see the "Multi-rack layout" section above) --
+  spilling extra racks onto additional slides, with the aggregated stats
+  panel moved to its own slide, is the natural next step, matching the
+  design agreed on before this was built (2 racks share one slide; 3+
+  splits across slides with stats separated out).
+- A web UI control for `rack_sizes` (a per-rack node count editor,
+  pre-filled with the auto-split result) -- `render_rack`, the CLI
+  (`--rack-sizes`), and `/api/render`/`/api/preview`'s `rack_sizes` field
+  all support the override already; only the web front-end doesn't expose
+  it yet.
 - Back-end switch pair when `backend_ports > 0`.
 - Auth, if the web app ever needs to leave a trusted network (currently none
   by design — see the "Docker shape" decision in project history).

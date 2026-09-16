@@ -98,9 +98,18 @@ RU_MAX = Inches(0.34)
 # report actually has -- a half-empty rack shows real empty space instead
 # of every cluster stretching to fill the same slide real estate. Also the
 # threshold for the "too many nodes for one rack" fallback (see
-# _draw_rack) -- proper multi-rack splitting is a separate, not-yet-built
-# feature (see CLAUDE.md).
+# _draw_rack), and for deciding where an *auto*-split between racks falls
+# (see _split_into_racks) once a cluster needs more than one.
 RACK_TOTAL_U = 42
+
+# The report's own rack_u/node heights never include the ToR switches --
+# they're networking gear, not part of the storage node count -- but they
+# still take real physical space in an actual 42U rack. Assume 1U per
+# switch (a common ToR form factor) when deciding how many nodes an
+# auto-split rack can hold; a manually-specified split (see
+# _split_into_racks's rack_sizes) isn't bound by this at all.
+RACK_SWITCH_RESERVED_U = 2
+RACK_NODE_CAPACITY_U = RACK_TOTAL_U - RACK_SWITCH_RESERVED_U
 
 # Below this, the 1U node photo (stretched from its own fixed aspect ratio)
 # doesn't have enough vertical resolution left to read as a server -- it
@@ -120,6 +129,16 @@ NODE_LABEL_W = Inches(1.3)
 
 STATS_X = Inches(4.75) + NODE_LABEL_GAP + NODE_LABEL_W + Inches(0.15)
 STATS_W = Inches(8.05) - (NODE_LABEL_GAP + NODE_LABEL_W + Inches(0.15))
+
+# Second rack column, when a cluster needs two (see _rack_geometry) --
+# narrower than the single-rack numbers above on both the frame and its
+# label, to leave the stats panel enough width for a single (rather than
+# side-by-side) column of cards.
+RACK_W_2UP = Inches(2.5)
+NODE_LABEL_W_2UP = Inches(1.0)
+RACK_GAP_2UP = Inches(0.35)  # between rack 1's label strip and rack 2's frame
+STATS_GAP_2UP = Inches(0.25)  # between rack 2's label strip and the stats panel
+STATS_RIGHT_MARGIN = Inches(0.53)  # matches the single-rack layout's implied right margin
 
 
 # --- shape helpers ----------------------------------------------------------
@@ -290,7 +309,7 @@ def _draw_server_photo(slide, x, y, w, h, is_new, photo_path=NODE_PHOTO_PATH, ph
     return border
 
 
-def _draw_switch(slide, x, y, w, h, label):
+def _draw_switch(slide, x, y, w, h, label, font_size=Pt(11)):
     shape = _rect(slide, x, y, w, h, fill=SWITCH_FILL, line=NODE_BORDER, line_w=Pt(0.75))
     _rect(slide, x, y, EAR_W, h, fill=SWITCH_EAR)
     _rect(slide, x + w - EAR_W, y, EAR_W, h, fill=SWITCH_EAR)
@@ -298,7 +317,7 @@ def _draw_switch(slide, x, y, w, h, label):
     inset = Inches(0.05)
     label_w = w * 0.34
     label_x = x + EAR_W + inset
-    _text(slide, label_x, y, label_w, h, label, Pt(11), SWITCH_TEXT, bold=True, anchor=MSO_ANCHOR.MIDDLE)
+    _text(slide, label_x, y, label_w, h, label, font_size, SWITCH_TEXT, bold=True, anchor=MSO_ANCHOR.MIDDLE)
 
     port_x = label_x + label_w + inset
     port_zone_w = x + w - EAR_W - inset - port_x
@@ -331,6 +350,83 @@ def _node_sequence(models: list) -> list:
         for _ in range(existing_n):
             seq.append({"code": m.code, "is_new": False, "ru": m.ru})
     return seq
+
+
+def _split_into_racks(seq: list, rack_sizes: list[int] | None = None) -> list[list]:
+    """Splits a flat node sequence (see `_node_sequence`) into one list per
+    physical rack, in the same order.
+
+    `rack_sizes`, when given, is an explicit node count per rack -- meant
+    to be the user's edit of a previous auto-split result, so it must
+    fully account for every node: raises `ValueError` if any count is
+    negative or the counts don't sum to `len(seq)` exactly, rather than
+    silently dropping or absorbing a mismatch into the last rack.
+
+    When omitted, racks are filled automatically by cumulative RU up to
+    `RACK_NODE_CAPACITY_U` per rack. The overwhelmingly common case --
+    everything fits in one rack -- yields exactly `[seq]`, so this is a
+    no-op for every report that predates multi-rack support.
+    """
+    if rack_sizes is not None:
+        if any(n < 0 for n in rack_sizes):
+            raise ValueError("rack sizes must be non-negative")
+        if sum(rack_sizes) != len(seq):
+            raise ValueError(f"rack sizes sum to {sum(rack_sizes)}, but there are {len(seq)} node(s) to place")
+        racks = []
+        i = 0
+        for n in rack_sizes:
+            racks.append(seq[i:i + n])
+            i += n
+        return racks
+
+    racks = []
+    current: list = []
+    current_ru = 0
+    for node in seq:
+        if current and current_ru + node["ru"] > RACK_NODE_CAPACITY_U:
+            racks.append(current)
+            current = []
+            current_ru = 0
+        current.append(node)
+        current_ru += node["ru"]
+    racks.append(current)
+    return racks
+
+
+def _rack_geometry(num_racks: int) -> dict:
+    """Positions for `num_racks` rack columns sharing one slide, plus
+    where that leaves the stats panel. `num_racks == 1` reproduces the
+    module's original single-rack constants exactly (`RACK_X`/`RACK_W`/
+    `NODE_LABEL_W`/`STATS_X`/`STATS_W`) -- untouched, unscaled. 2 racks
+    share the narrower `*_2UP` constants on both columns, leaving the
+    stats panel one (rather than side-by-side) column of cards' worth of
+    width. Anything beyond 2 doesn't fit on one slide at any legible
+    scale -- that's a separate, not-yet-built multi-slide feature (see
+    CLAUDE.md)."""
+    if num_racks == 1:
+        return {"rack_x": [RACK_X], "rack_w": RACK_W, "label_w": NODE_LABEL_W,
+                "stats_x": STATS_X, "stats_w": STATS_W}
+    if num_racks == 2:
+        rack_x0 = RACK_X
+        rack_x1 = rack_x0 + RACK_W_2UP + NODE_LABEL_GAP + NODE_LABEL_W_2UP + RACK_GAP_2UP
+        stats_x = rack_x1 + RACK_W_2UP + NODE_LABEL_GAP + NODE_LABEL_W_2UP + STATS_GAP_2UP
+        stats_w = SLIDE_W - stats_x - STATS_RIGHT_MARGIN
+        return {"rack_x": [rack_x0, rack_x1], "rack_w": RACK_W_2UP, "label_w": NODE_LABEL_W_2UP,
+                "stats_x": stats_x, "stats_w": stats_w}
+    raise ValueError(f"this report needs {num_racks} racks; more than 2 on one slide isn't supported yet")
+
+
+def _rack_labels(base_label: str | None, num_racks: int) -> list[str]:
+    """`base_label` as-is for a single rack (unchanged default behavior);
+    for multiple, a "Rack N" suffix on each so they're distinguishable --
+    imperfect if `base_label` was itself already rack-specific (e.g. "Row
+    3 / Rack 12"), but a free-text single label can't unambiguously name
+    N racks without the user splitting it themselves, and this is at
+    least never blank or ambiguous."""
+    if num_racks == 1:
+        return [base_label or "Rack 1"]
+    prefix = base_label or "Rack"
+    return [f"{prefix} — Rack {i + 1}" for i in range(num_racks)]
 
 
 # --- formatting helpers ---------------------------------------------------
@@ -442,24 +538,35 @@ def available_stats(report: ClusterReport) -> list:
 # --- rack elevation ---------------------------------------------------------
 
 
-def _draw_rack(slide, report: ClusterReport, rack_label: str, label_text=None, muted_text=None):
-    """`label_text`/`muted_text`, when given, override the rack label /
-    node-code-label color and the legend text color respectively -- used
-    when rendering against a template, so these stay legible against a
-    sampled background that may be dark (the module's own defaults assume
-    a white background)."""
+def _draw_rack(slide, seq: list, rack_label: str, rack_x, rack_w, label_w, label_text=None, muted_text=None):
+    """Draws one physical rack: frame, switches, cabling, and `seq`'s nodes
+    (one rack's slice of `_node_sequence`'s output, via `_split_into_racks`
+    -- not necessarily the whole cluster). `rack_x`/`rack_w`/`label_w` come
+    from `_rack_geometry`, so this same function draws every column
+    regardless of how many racks share the slide.
+
+    `label_text`/`muted_text`, when given, override the rack label /
+    node-code-label color respectively -- used when rendering against a
+    template, so these stay legible against a sampled background that may
+    be dark (the module's own defaults assume a white background).
+
+    Returns the frame's bottom Y. That's the same for every rack on a
+    slide (the frame always spans the fixed 42U envelope regardless of
+    content), so callers draw one shared legend below all of them via
+    `_draw_legend` rather than getting one back per rack.
+    """
     label_text = label_text or RACK_LABEL_TEXT
-    muted_text = muted_text or SUBTITLE_TEXT
-    seq = _node_sequence(report.models)
     total_ru = sum(n["ru"] for n in seq) or 1
 
     available = RACK_BOTTOM_MAX - RACK_Y - 2 * SWITCH_H
     frame_h = 2 * SWITCH_H + available  # the rack frame always spans the full 42U enclosure
 
     if total_ru > RACK_TOTAL_U:
-        # More nodes than physically fit in one 42U rack -- not yet handled
-        # (see "multi-rack splitting" in CLAUDE.md); compress to fit rather
-        # than overflowing the frame.
+        # More nodes than physically fit in one 42U rack -- shouldn't
+        # normally happen once a report's `_split_into_racks` result is
+        # respected, but compress to fit rather than overflowing the frame
+        # if it ever does (e.g. a manual rack_sizes override that packs
+        # one rack past capacity on purpose).
         ru_height = available / total_ru
     else:
         # Give nodes a legible floor height, even though that means small
@@ -477,22 +584,26 @@ def _draw_rack(slide, report: ClusterReport, rack_label: str, label_text=None, m
     nodes_top_y = frame_bottom_y - ru_height * total_ru  # bottom-align the node stack
 
     _text(
-        slide, RACK_X, RACK_Y - Inches(0.32), RACK_W, Inches(0.28),
+        slide, rack_x, RACK_Y - Inches(0.32), rack_w, Inches(0.28),
         rack_label, Pt(15), label_text, bold=True,
     )
 
-    _rect(slide, RACK_X - Inches(0.06), RACK_Y - Inches(0.06), RACK_W + Inches(0.12),
+    _rect(slide, rack_x - Inches(0.06), RACK_Y - Inches(0.06), rack_w + Inches(0.12),
           frame_h + Inches(0.12), fill=None, line=RACK_FRAME, line_w=Pt(1.5))
 
+    # "ToR Switch A/B" at the normal Pt(11) wraps to two lines once the
+    # switch (and its label sub-box, a fixed fraction of rack_w) narrows
+    # for a multi-rack slide -- shrink to fit rather than let it wrap.
+    switch_font_size = Pt(11) if rack_w >= RACK_W else Pt(8)
     y = RACK_Y
     for label in ("ToR Switch A", "ToR Switch B"):
-        _draw_switch(slide, RACK_X, y, RACK_W, SWITCH_H, label)
+        _draw_switch(slide, rack_x, y, rack_w, SWITCH_H, label, font_size=switch_font_size)
         y += SWITCH_H
 
     # Cabling runs to the left of the rack (not the right) so the strip to
     # the right of the frame is free for model-code labels instead.
-    bus_a_x = RACK_X - Inches(0.18)
-    bus_b_x = RACK_X - Inches(0.34)
+    bus_a_x = rack_x - Inches(0.18)
+    bus_b_x = rack_x - Inches(0.34)
     switch_a_mid_y = RACK_Y + SWITCH_H * 0.5
     switch_b_mid_y = RACK_Y + SWITCH_H * 1.5
     bus_bottom_y = frame_bottom_y
@@ -502,43 +613,50 @@ def _draw_rack(slide, report: ClusterReport, rack_label: str, label_text=None, m
         # floating gap between the switch and the top of the bus.
         _connector(slide, bus_a_x, switch_a_mid_y, bus_a_x, bus_bottom_y, CABLE_SWITCH_A, Pt(1.5))
         _connector(slide, bus_b_x, switch_b_mid_y, bus_b_x, bus_bottom_y, CABLE_SWITCH_B, Pt(1.5))
-        _connector(slide, RACK_X, switch_a_mid_y, bus_a_x, switch_a_mid_y, CABLE_SWITCH_A, Pt(1.5))
-        _connector(slide, RACK_X, switch_b_mid_y, bus_b_x, switch_b_mid_y, CABLE_SWITCH_B, Pt(1.5))
+        _connector(slide, rack_x, switch_a_mid_y, bus_a_x, switch_a_mid_y, CABLE_SWITCH_A, Pt(1.5))
+        _connector(slide, rack_x, switch_b_mid_y, bus_b_x, switch_b_mid_y, CABLE_SWITCH_B, Pt(1.5))
 
-    label_x = RACK_X + RACK_W + NODE_LABEL_GAP
+    label_x = rack_x + rack_w + NODE_LABEL_GAP
     y = nodes_top_y  # nodes sit at the bottom of the rack, not right below the switches
     for node in seq:
         h = ru_height * node["ru"]
         if node["ru"] == 1:
-            _draw_server_photo(slide, RACK_X, y, RACK_W, h, node["is_new"])
+            _draw_server_photo(slide, rack_x, y, rack_w, h, node["is_new"])
         elif node["ru"] == 2:
-            _draw_server_photo(slide, RACK_X, y, RACK_W, h, node["is_new"],
+            _draw_server_photo(slide, rack_x, y, rack_w, h, node["is_new"],
                                 photo_path=NODE_PHOTO_2U_PATH, photo_crop=NODE_PHOTO_2U_CROP)
         else:
             fill = NODE_NEW_FILL if node["is_new"] else NODE_FILL
-            _draw_server(slide, RACK_X, y, RACK_W, h, fill, node["is_new"])
+            _draw_server(slide, rack_x, y, rack_w, h, fill, node["is_new"])
 
         label = node["code"] + (" • NEW" if node["is_new"] else "")
         font_size = Pt(10) if h >= NODE_DETAIL_MIN_H else Pt(7)
-        _text(slide, label_x, y, NODE_LABEL_W, h, label, font_size,
+        _text(slide, label_x, y, label_w, h, label, font_size,
               NODE_NEW_FILL if node["is_new"] else label_text,
               bold=node["is_new"], anchor=MSO_ANCHOR.MIDDLE)
 
         mid_y = y + h / 2
-        _connector(slide, RACK_X, mid_y, bus_a_x, mid_y, CABLE_SWITCH_A, Pt(0.75))
-        _connector(slide, RACK_X, mid_y, bus_b_x, mid_y, CABLE_SWITCH_B, Pt(0.75))
+        _connector(slide, rack_x, mid_y, bus_a_x, mid_y, CABLE_SWITCH_A, Pt(0.75))
+        _connector(slide, rack_x, mid_y, bus_b_x, mid_y, CABLE_SWITCH_B, Pt(0.75))
         y += h
 
-    legend_y = frame_bottom_y + Inches(0.18)
+    return frame_bottom_y
+
+
+def _draw_legend(slide, x, legend_y, muted_text=None):
+    """Drawn once per slide (not once per rack) below whichever rack's
+    frame bottom the caller passes -- every rack on a slide shares the
+    same frame height, so it doesn't matter which one."""
+    muted_text = muted_text or SUBTITLE_TEXT
     sw = Inches(0.14)
-    _rect(slide, RACK_X, legend_y, sw, sw, fill=NODE_NEW_FILL)
-    _text(slide, RACK_X + sw + Inches(0.08), legend_y - Inches(0.02), Inches(1.4), Inches(0.2),
+    _rect(slide, x, legend_y, sw, sw, fill=NODE_NEW_FILL)
+    _text(slide, x + sw + Inches(0.08), legend_y - Inches(0.02), Inches(1.4), Inches(0.2),
           "New node", Pt(9), muted_text)
-    _connector(slide, RACK_X + Inches(1.55), legend_y + sw / 2, RACK_X + Inches(1.85), legend_y + sw / 2, CABLE_SWITCH_A, Pt(1.5))
-    _text(slide, RACK_X + Inches(1.9), legend_y - Inches(0.02), Inches(1.0), Inches(0.2),
+    _connector(slide, x + Inches(1.55), legend_y + sw / 2, x + Inches(1.85), legend_y + sw / 2, CABLE_SWITCH_A, Pt(1.5))
+    _text(slide, x + Inches(1.9), legend_y - Inches(0.02), Inches(1.0), Inches(0.2),
           "Switch A", Pt(9), muted_text)
-    _connector(slide, RACK_X + Inches(2.75), legend_y + sw / 2, RACK_X + Inches(3.05), legend_y + sw / 2, CABLE_SWITCH_B, Pt(1.5))
-    _text(slide, RACK_X + Inches(3.1), legend_y - Inches(0.02), Inches(1.0), Inches(0.2),
+    _connector(slide, x + Inches(2.75), legend_y + sw / 2, x + Inches(3.05), legend_y + sw / 2, CABLE_SWITCH_B, Pt(1.5))
+    _text(slide, x + Inches(3.1), legend_y - Inches(0.02), Inches(1.0), Inches(0.2),
           "Switch B", Pt(9), muted_text)
 
     return legend_y + sw + Inches(0.1)
@@ -547,11 +665,12 @@ def _draw_rack(slide, report: ClusterReport, rack_label: str, label_text=None, m
 # --- stats panel -------------------------------------------------------
 
 
-def _draw_stat_card(slide, cx, cy, w, title, rows, header_h, row_h, two_col, header_fill=STAT_HEADER_FILL):
+def _draw_stat_card(slide, cx, cy, w, title, rows, header_h, row_h, two_col, header_fill=STAT_HEADER_FILL,
+                     card_pad=Inches(0.1), font_size=Pt(10.5)):
     """Draw one stat card and return its height. `rows` is already the
     final (label, value) list to show -- filtering happens upstream."""
     n_lines = (len(rows) + 1) // 2 if two_col else len(rows)
-    card_h = header_h + row_h * n_lines + Inches(0.1)
+    card_h = header_h + row_h * n_lines + card_pad
     _rect(slide, cx, cy, w, card_h, fill=STAT_CARD_BG, line=STAT_CARD_BORDER, line_w=Pt(0.75))
     hshape = _rect(slide, cx, cy, w, header_h, fill=header_fill)
     _label_in_shape(hshape, title, Pt(12), STAT_HEADER_TEXT, bold=True, align=PP_ALIGN.LEFT)
@@ -568,14 +687,28 @@ def _draw_stat_card(slide, cx, cy, w, title, rows, header_h, row_h, two_col, hea
         ccx = cx + col_idx * col_w
         ry2 = ry
         for label, value in col:
-            _text(slide, ccx + Inches(0.12), ry2, col_w * 0.58, row_h, label, Pt(10.5), STAT_LABEL_TEXT)
-            _text(slide, ccx + col_w * 0.58, ry2, col_w * 0.4, row_h, value, Pt(10.5), STAT_VALUE_TEXT,
+            _text(slide, ccx + Inches(0.12), ry2, col_w * 0.58, row_h, label, font_size, STAT_LABEL_TEXT)
+            _text(slide, ccx + col_w * 0.58, ry2, col_w * 0.4, row_h, value, font_size, STAT_VALUE_TEXT,
                   bold=True, align=PP_ALIGN.RIGHT)
             ry2 += row_h
     return card_h
 
 
-def _draw_stats(slide, report: ClusterReport, visible_stats=None, header_fill=STAT_HEADER_FILL):
+def _draw_stats(slide, report: ClusterReport, visible_stats=None, header_fill=STAT_HEADER_FILL,
+                 stats_x=STATS_X, stats_w=STATS_W, allow_pair=True, compact=False):
+    """`stats_x`/`stats_w` come from `_rack_geometry`, so this panel fits
+    whatever width sharing the slide with one or two racks leaves. `allow_pair`
+    disables the first-two-sections-side-by-side layout below -- forced off
+    by `render_rack` for the narrower 2-rack width, where two half-width
+    cards would be too cramped to read a "label ... value" row in.
+
+    `compact`, set alongside `allow_pair=False`, tightens header height,
+    card spacing, and the row-height floor: forcing every card to a single
+    column of rows (see `allow_pair` above) roughly doubles how many lines
+    a report's full stat set needs, and without reclaiming this overhead
+    a report with a realistic number of stats (not even an extreme
+    everything-selected case) started overflowing past the slide's bottom
+    edge even at the normal floor."""
     # Sections a user deselected entirely are dropped, not shown empty --
     # the layout below adapts to however many (0-4+) are left, and to
     # however many rows each has: a user can select anywhere from a
@@ -585,22 +718,30 @@ def _draw_stats(slide, report: ClusterReport, visible_stats=None, header_fill=ST
     if not sections:
         return
 
-    card_gap = Inches(0.18)
-    header_h = Inches(0.32)
-    x = STATS_X
-    col_w = (STATS_W - card_gap) / 2
+    card_gap = Inches(0.1) if compact else Inches(0.18)
+    header_h = Inches(0.24) if compact else Inches(0.32)
+    row_h_floor = Inches(0.13) if compact else Inches(0.16)
+    card_pad = Inches(0.06) if compact else Inches(0.1)
+    stat_font_size = Pt(9) if compact else Pt(10.5)
+    x = stats_x
+    col_w = (stats_w - card_gap) / 2
 
     # Build the layout plan first (without knowing row_h yet): a list of
     # "visual rows", each either one full-width card or two side-by-side --
     # only the first two sections ever pair up, matching the original
     # Capacity/Performance-side-by-side design.
-    top_row, rest = sections[:2], sections[2:]
+    # allow_pair also gates each full-width card's own internal two-column
+    # row layout, not just whether two cards sit side by side -- both are
+    # the same "is there enough width for 2 side-by-side label/value
+    # groups" question, and a narrow stats panel (2 racks sharing the
+    # slide) answers no to both, not just the first.
+    top_row, rest = (sections[:2], sections[2:]) if allow_pair else ([], sections)
     if len(top_row) == 2:
         plan = [[(x, col_w, top_row[0][0], top_row[0][1], False),
                  (x + col_w + card_gap, col_w, top_row[1][0], top_row[1][1], False)]]
-        plan += [[(x, STATS_W, title, rows, True)] for title, rows in rest]
+        plan += [[(x, stats_w, title, rows, allow_pair)] for title, rows in rest]
     else:
-        plan = [[(x, STATS_W, title, rows, True)] for title, rows in top_row + rest]
+        plan = [[(x, stats_w, title, rows, allow_pair)] for title, rows in top_row + rest]
 
     def lines_needed(rows, two_col):
         return (len(rows) + 1) // 2 if two_col else len(rows)
@@ -611,13 +752,13 @@ def _draw_stats(slide, report: ClusterReport, visible_stats=None, header_fill=ST
     # so the panel always fits between the rack's top and the slide's
     # bottom regardless of how many stats got selected.
     available_h = SLIDE_H - Inches(0.3) - RACK_Y
-    overhead = len(plan) * (header_h + Inches(0.1)) + max(0, len(plan) - 1) * card_gap
+    overhead = len(plan) * (header_h + card_pad) + max(0, len(plan) - 1) * card_gap
     row_h = (available_h - overhead) / (sum(line_counts) or 1)
-    row_h = max(Inches(0.16), min(Inches(0.28), row_h))
+    row_h = max(row_h_floor, min(Inches(0.28), row_h))
 
     y = RACK_Y
     for vrow in plan:
-        h = max(_draw_stat_card(slide, cx, y, w, title, rows, header_h, row_h, two_col, header_fill)
+        h = max(_draw_stat_card(slide, cx, y, w, title, rows, header_h, row_h, two_col, header_fill, card_pad, stat_font_size)
                 for cx, w, title, rows, two_col in vrow)
         y += h + card_gap
 
@@ -1087,11 +1228,22 @@ def derive_template(source_path: str, out_path: str, slide_index: int | None = N
 
 def render_rack(report: ClusterReport, out_path: str, rack_label: str | None = None,
                  visible_stats=None, template_path: str | None = None,
-                 template_slide: int | None = None) -> str:
+                 template_slide: int | None = None, rack_sizes: list[int] | None = None) -> str:
     """`visible_stats`, when given, is an iterable of stat keys (see
     `available_stats`) -- only those appear in the stats panel, and a
     section left with none of its stats selected is omitted entirely.
     `None` (the default) shows every stat, matching the CLI's behavior.
+
+    `rack_sizes`, when given, is an explicit node count per rack (see
+    `_split_into_racks`); omit it to auto-split by RU whenever the cluster
+    needs more than one rack (unchanged, exactly one rack, for the common
+    case that doesn't). Up to 2 racks share one slide, scaled down (see
+    `_rack_geometry`) to leave room for the stats panel, which always
+    covers the *whole* cluster regardless of how many racks it's split
+    across -- matching the source report, which never gives a per-rack
+    breakdown either. More than 2 racks isn't supported yet (raises
+    `ValueError`) -- that needs spilling onto additional slides, a
+    separate not-yet-built piece (see CLAUDE.md).
 
     `template_path`, when given, is an existing .pptx: our rack slide is
     appended after any slides it already has, using a heuristically-chosen
@@ -1165,9 +1317,22 @@ def render_rack(report: ClusterReport, out_path: str, rack_label: str | None = N
     subtitle_bits = [b for b in [node_summary, _fmt(report.usable_tb, " TB Usable", 2)] if b]
     _text(slide, Inches(0.55), Inches(0.68), Inches(9), Inches(0.3), " • ".join(subtitle_bits), Pt(13), muted_text)
 
-    label = rack_label or "Rack 1"
-    rack_bottom = _draw_rack(slide, report, label, label_text=label_text, muted_text=muted_text)
-    _draw_stats(slide, report, visible_stats, header_fill=header_fill)
+    seq_all = _node_sequence(report.models)
+    racks = _split_into_racks(seq_all, rack_sizes=rack_sizes)
+    geometry = _rack_geometry(len(racks))
+    labels = _rack_labels(rack_label, len(racks))
+
+    frame_bottom = None
+    for rack_x, rack_seq, rack_lbl in zip(geometry["rack_x"], racks, labels):
+        frame_bottom = _draw_rack(slide, rack_seq, rack_lbl, rack_x, geometry["rack_w"], geometry["label_w"],
+                                   label_text=label_text, muted_text=muted_text)
+
+    legend_y = frame_bottom + Inches(0.18)
+    rack_bottom = _draw_legend(slide, geometry["rack_x"][0], legend_y, muted_text)
+
+    _draw_stats(slide, report, visible_stats, header_fill=header_fill,
+                stats_x=geometry["stats_x"], stats_w=geometry["stats_w"],
+                allow_pair=(len(racks) == 1), compact=(len(racks) > 1))
 
     if report.source_file:
         source_y = min(rack_bottom, SLIDE_H - Inches(0.32))
