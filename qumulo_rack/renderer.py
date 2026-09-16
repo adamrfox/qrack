@@ -12,12 +12,15 @@ chassis art itself isn't.
 
 from __future__ import annotations
 
+import colorsys
 import re
+from collections import Counter
 from pathlib import Path
 
 from lxml import etree
 from pptx import Presentation
 from pptx.dml.color import RGBColor
+from pptx.enum.dml import MSO_COLOR_TYPE, MSO_FILL_TYPE, MSO_THEME_COLOR
 from pptx.enum.shapes import MSO_CONNECTOR, MSO_SHAPE, PP_PLACEHOLDER
 from pptx.enum.text import MSO_ANCHOR, PP_ALIGN
 from pptx.opc.constants import RELATIONSHIP_TYPE as RT
@@ -427,7 +430,14 @@ def available_stats(report: ClusterReport) -> list:
 # --- rack elevation ---------------------------------------------------------
 
 
-def _draw_rack(slide, report: ClusterReport, rack_label: str):
+def _draw_rack(slide, report: ClusterReport, rack_label: str, label_text=None, muted_text=None):
+    """`label_text`/`muted_text`, when given, override the rack label /
+    node-code-label color and the legend text color respectively -- used
+    when rendering against a template, so these stay legible against a
+    sampled background that may be dark (the module's own defaults assume
+    a white background)."""
+    label_text = label_text or RACK_LABEL_TEXT
+    muted_text = muted_text or SUBTITLE_TEXT
     seq = _node_sequence(report.models)
     total_ru = sum(n["ru"] for n in seq) or 1
 
@@ -456,7 +466,7 @@ def _draw_rack(slide, report: ClusterReport, rack_label: str):
 
     _text(
         slide, RACK_X, RACK_Y - Inches(0.32), RACK_W, Inches(0.28),
-        rack_label, Pt(15), RACK_LABEL_TEXT, bold=True,
+        rack_label, Pt(15), label_text, bold=True,
     )
 
     _rect(slide, RACK_X - Inches(0.06), RACK_Y - Inches(0.06), RACK_W + Inches(0.12),
@@ -496,7 +506,7 @@ def _draw_rack(slide, report: ClusterReport, rack_label: str):
         label = node["code"] + (" • NEW" if node["is_new"] else "")
         font_size = Pt(10) if h >= NODE_DETAIL_MIN_H else Pt(7)
         _text(slide, label_x, y, NODE_LABEL_W, h, label, font_size,
-              NODE_NEW_FILL if node["is_new"] else NODE_LABEL_TEXT,
+              NODE_NEW_FILL if node["is_new"] else label_text,
               bold=node["is_new"], anchor=MSO_ANCHOR.MIDDLE)
 
         mid_y = y + h / 2
@@ -508,13 +518,13 @@ def _draw_rack(slide, report: ClusterReport, rack_label: str):
     sw = Inches(0.14)
     _rect(slide, RACK_X, legend_y, sw, sw, fill=NODE_NEW_FILL)
     _text(slide, RACK_X + sw + Inches(0.08), legend_y - Inches(0.02), Inches(1.4), Inches(0.2),
-          "New node", Pt(9), SUBTITLE_TEXT)
+          "New node", Pt(9), muted_text)
     _connector(slide, RACK_X + Inches(1.55), legend_y + sw / 2, RACK_X + Inches(1.85), legend_y + sw / 2, CABLE_SWITCH_A, Pt(1.5))
     _text(slide, RACK_X + Inches(1.9), legend_y - Inches(0.02), Inches(1.0), Inches(0.2),
-          "Switch A", Pt(9), SUBTITLE_TEXT)
+          "Switch A", Pt(9), muted_text)
     _connector(slide, RACK_X + Inches(2.75), legend_y + sw / 2, RACK_X + Inches(3.05), legend_y + sw / 2, CABLE_SWITCH_B, Pt(1.5))
     _text(slide, RACK_X + Inches(3.1), legend_y - Inches(0.02), Inches(1.0), Inches(0.2),
-          "Switch B", Pt(9), SUBTITLE_TEXT)
+          "Switch B", Pt(9), muted_text)
 
     return legend_y + sw + Inches(0.1)
 
@@ -660,6 +670,312 @@ def _theme_colors(slide_master) -> dict:
     return colors
 
 
+_A_NS = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+
+_LITERAL_SCHEME_KEYS = {
+    MSO_THEME_COLOR.DARK_1: "dk1", MSO_THEME_COLOR.LIGHT_1: "lt1",
+    MSO_THEME_COLOR.DARK_2: "dk2", MSO_THEME_COLOR.LIGHT_2: "lt2",
+    MSO_THEME_COLOR.ACCENT_1: "accent1", MSO_THEME_COLOR.ACCENT_2: "accent2",
+    MSO_THEME_COLOR.ACCENT_3: "accent3", MSO_THEME_COLOR.ACCENT_4: "accent4",
+    MSO_THEME_COLOR.ACCENT_5: "accent5", MSO_THEME_COLOR.ACCENT_6: "accent6",
+    MSO_THEME_COLOR.HYPERLINK: "hlink", MSO_THEME_COLOR.FOLLOWED_HYPERLINK: "folHlink",
+}
+_SEMANTIC_SCHEME_ATTRS = {
+    MSO_THEME_COLOR.TEXT_1: "tx1", MSO_THEME_COLOR.BACKGROUND_1: "bg1",
+    MSO_THEME_COLOR.TEXT_2: "tx2", MSO_THEME_COLOR.BACKGROUND_2: "bg2",
+}
+
+
+def _color_map(slide_master) -> dict:
+    """`{'bg1': 'lt1', 'tx1': 'dk1', ...}` from the master's `<p:clrMap>` --
+    real content overwhelmingly references the *semantic* bg1/tx1/bg2/tx2
+    slots, not the literal dk1/lt1/dk2/lt2 scheme slots `_theme_colors()`
+    is keyed by, and this mapping is what actually resolves one to the
+    other. It's per-master and can be (and on a dark-background master,
+    sometimes is) inverted from the usual bg1->lt1/tx1->dk1 assumption, so
+    it's never safe to hardcode."""
+    el = slide_master._element.find(qn("p:clrMap"))
+    return dict(el.attrib) if el is not None else {}
+
+
+def _resolve_color_format(color_format, theme_colors: dict, color_map: dict):
+    """Best-effort `RGBColor` for a python-pptx `ColorFormat`, or `None` if
+    it isn't explicitly set on this object (inherited from further up the
+    style cascade -- not worth chasing further) or can't be resolved.
+    Handles a literal RGB value and a theme reference alike, including the
+    semantic tx1/bg1/tx2/bg2 slots (via that master's own `_color_map`,
+    never a hardcoded guess) as well as the literal dk1/lt1/dk2/lt2/
+    accentN/hlink/folHlink slots."""
+    try:
+        kind = color_format.type
+    except AttributeError:
+        return None
+    if kind == MSO_COLOR_TYPE.RGB:
+        try:
+            return color_format.rgb
+        except Exception:
+            return None
+    if kind != MSO_COLOR_TYPE.SCHEME:
+        return None  # unset, or an HSL/PRESET/SCRGB/SYSTEM color -- not worth chasing
+    theme_color = color_format.theme_color
+    key = _LITERAL_SCHEME_KEYS.get(theme_color)
+    if key is None:
+        attr = _SEMANTIC_SCHEME_ATTRS.get(theme_color)
+        key = color_map.get(attr) if attr else None
+    return theme_colors.get(key) if key else None
+
+
+def _is_neutral_color(rgb) -> bool:
+    """True for near-white/near-black/muted colors -- the backgrounds,
+    borders, and secondary text shades (greys, and desaturated navys/
+    charcoals used as "the other text color" on light backgrounds) that
+    dominate any deck's color usage but say nothing about its brand
+    accent. The 0.4 saturation bar is deliberately strict: real accent
+    colors (a bright amber, cyan, teal, ...) read close to fully
+    saturated, while a merely-dark-but-not-vibrant color like a desaturated
+    navy text shade lands well below it -- seen firsthand sampling a real
+    deck, where a 0.15 bar let exactly that kind of navy through as the
+    "accent" ahead of the deck's actual bright highlight color."""
+    r, g, b = rgb[0] / 255, rgb[1] / 255, rgb[2] / 255
+    _hue, lightness, saturation = colorsys.rgb_to_hls(r, g, b)
+    return saturation < 0.4 or lightness > 0.93 or lightness < 0.07
+
+
+def _contrasts(c1, c2, min_diff: float = 0.35) -> bool:
+    """True if `c1` is a plausible text color against background `c2` --
+    a simple lightness-gap proxy for "readable," not a full WCAG contrast
+    ratio, but enough to catch a real failure mode: `_sample_deck_colors`
+    tallies the deck's most common title color and most common background
+    independently across all slides, so they can come from different
+    subsets of slides (e.g. white titles on a few dark section-header
+    slides, but a mostly-white deck overall) and land on the *same* color
+    once paired up -- an invisible white-on-white title, seen firsthand."""
+    l1 = colorsys.rgb_to_hls(c1[0] / 255, c1[1] / 255, c1[2] / 255)[1]
+    l2 = colorsys.rgb_to_hls(c2[0] / 255, c2[1] / 255, c2[2] / 255)[1]
+    return abs(l1 - l2) >= min_diff
+
+
+def _blend(c1: RGBColor, c2: RGBColor, t: float) -> RGBColor:
+    """Linear-interpolate from `c1` toward `c2` by fraction `t` (0=`c1`,
+    1=`c2`). Used to derive a muted secondary-text shade from the sampled
+    text/background colors that's always a step toward the background --
+    correctly a light gray on a dark deck and a dark gray on a light one --
+    rather than a single hardcoded gray tuned for a light background,
+    which would be nearly invisible against a dark-themed template."""
+    return RGBColor(*(round(c1[i] + (c2[i] - c1[i]) * t) for i in range(3)))
+
+
+def _effective_background_color(background, theme_colors: dict, color_map: dict):
+    try:
+        if background.fill.type != MSO_FILL_TYPE.SOLID:
+            return None
+        return _resolve_color_format(background.fill.fore_color, theme_colors, color_map)
+    except Exception:
+        return None
+
+
+def _full_bleed_fill_color(shapes, slide_w, slide_h, theme_colors: dict, color_map: dict):
+    """The fill of a shape sized and positioned to cover the entire slide
+    -- the common Google Slides export pattern of faking a background with
+    a plain rectangle instead of the real OOXML background-fill mechanism,
+    which `_effective_background_color` alone would miss entirely. Only
+    the first such shape counts; a real background is normally the
+    bottom-most (first) shape in the tree anyway."""
+    tolerance = int(min(slide_w, slide_h) * 0.02)
+    for shape in shapes:
+        try:
+            if shape.left is None or shape.top is None or shape.width is None or shape.height is None:
+                continue
+            if (abs(shape.left) > tolerance or abs(shape.top) > tolerance
+                    or abs(shape.width - slide_w) > tolerance
+                    or abs(shape.height - slide_h) > tolerance):
+                continue
+            if shape.fill.type != MSO_FILL_TYPE.SOLID:
+                continue
+            color = _resolve_color_format(shape.fill.fore_color, theme_colors, color_map)
+        except Exception:
+            continue
+        if color:
+            return color
+    return None
+
+
+def _layout_title_default_color(layout, theme_colors: dict, color_map: dict):
+    """A title placeholder's own text runs are frequently left with no
+    explicit color at all -- the actual styling lives on the LAYOUT's copy
+    of that placeholder (common in Google Slides exports, which bake
+    per-layout text styles into `<a:lstStyle>` rather than per-run
+    formatting). Reads that layout-level default straight from the XML,
+    since python-pptx has no higher-level accessor for it."""
+    for ph in layout.placeholders:
+        if ph.placeholder_format.type not in (PP_PLACEHOLDER.TITLE, PP_PLACEHOLDER.CENTER_TITLE):
+            continue
+        lst_style = ph.text_frame._txBody.find(f"{_A_NS}lstStyle")
+        lvl1 = lst_style.find(f"{_A_NS}lvl1pPr") if lst_style is not None else None
+        def_rpr = lvl1.find(f"{_A_NS}defRPr") if lvl1 is not None else None
+        fill = def_rpr.find(f"{_A_NS}solidFill") if def_rpr is not None else None
+        if fill is None:
+            continue
+        srgb = fill.find(f"{_A_NS}srgbClr")
+        if srgb is not None:
+            return RGBColor.from_string(srgb.get("val"))
+        scheme = fill.find(f"{_A_NS}schemeClr")
+        if scheme is not None:
+            val = scheme.get("val")
+            key = val if val in theme_colors else color_map.get(val)
+            if key:
+                return theme_colors.get(key)
+    return None
+
+
+def _title_placeholder(slide):
+    for shape in slide.shapes:
+        if shape.is_placeholder and shape.placeholder_format.type in (PP_PLACEHOLDER.TITLE, PP_PLACEHOLDER.CENTER_TITLE):
+            return shape
+    return None
+
+
+def _sample_deck_colors(prs: Presentation) -> dict:
+    """Samples colors actually used across the deck's real slides, rather
+    than reading the theme's abstract color scheme (`_theme_colors`) -- a
+    real branded deck, especially a Google Slides export, doesn't reliably
+    paint its content with its own declared theme colors (seen firsthand:
+    one deck's theme scheme said "navy text on white", but most of its
+    slides are actually solid-black backgrounds with white text -- the
+    scheme was simply never applied to most of the deck). Returns up to
+    `{'background':, 'text':, 'accent':}` as `RGBColor`, omitting whichever
+    it couldn't determine -- callers fall back to `_theme_colors()` and
+    then this module's own defaults for the rest.
+
+    - `background`: the most common effective background across all
+      slides (explicit slide/layout/master `<p:bg>`, or the Google Slides
+      full-bleed-rectangle workaround via `_full_bleed_fill_color`).
+    - `text`: the most common color used on a title placeholder, per
+      slide (its own run color, falling back to its layout's default via
+      `_layout_title_default_color` when the run itself has no override).
+    - `accent`: the most common non-neutral color (see `_is_neutral_color`)
+      among all text runs and shape fills that isn't already the winning
+      background/text color -- a best-effort proxy for "the one color
+      this deck uses to draw the eye," not a guarantee.
+
+    Every color is resolved through that *slide's own* master (schemeClr
+    references go through that master's `_color_map`, so this stays
+    correct even across a deck with more than one master/theme).
+    """
+    bg_votes: Counter = Counter()
+    title_votes: Counter = Counter()
+    accent_votes: Counter = Counter()
+
+    for slide in prs.slides:
+        layout = slide.slide_layout
+        master = layout.slide_master
+        theme_colors = _theme_colors(master)
+        color_map = _color_map(master)
+
+        bg = (_effective_background_color(slide.background, theme_colors, color_map)
+              or _effective_background_color(layout.background, theme_colors, color_map)
+              or _effective_background_color(master.background, theme_colors, color_map)
+              or _full_bleed_fill_color(slide.shapes, prs.slide_width, prs.slide_height, theme_colors, color_map)
+              or _full_bleed_fill_color(layout.shapes, prs.slide_width, prs.slide_height, theme_colors, color_map))
+        if bg:
+            bg_votes[bg] += 1
+
+        title_shape = _title_placeholder(slide)
+        title_color = None
+        if title_shape is not None and title_shape.has_text_frame:
+            for para in title_shape.text_frame.paragraphs:
+                for run in para.runs:
+                    if run.text.strip():
+                        title_color = _resolve_color_format(run.font.color, theme_colors, color_map)
+                        if title_color:
+                            break
+                if title_color:
+                    break
+            if title_color is None:
+                title_color = _layout_title_default_color(layout, theme_colors, color_map)
+        if title_color:
+            title_votes[title_color] += 1
+
+        for shape in slide.shapes:
+            if shape.has_text_frame:
+                for para in shape.text_frame.paragraphs:
+                    for run in para.runs:
+                        if not run.text.strip():
+                            continue
+                        color = _resolve_color_format(run.font.color, theme_colors, color_map)
+                        if color and not _is_neutral_color(color):
+                            accent_votes[color] += 1
+            try:
+                if shape.fill.type == MSO_FILL_TYPE.SOLID:
+                    color = _resolve_color_format(shape.fill.fore_color, theme_colors, color_map)
+                    if color and not _is_neutral_color(color):
+                        accent_votes[color] += 1
+            except Exception:
+                pass
+
+    result = {}
+    if bg_votes:
+        result["background"] = bg_votes.most_common(1)[0][0]
+    bg_pick = result.get("background")
+    for color, _n in title_votes.most_common():
+        # The winning title color must actually read against the winning
+        # background -- see `_contrasts`. When there's no background to
+        # check against, take the plain top vote.
+        if bg_pick is None or _contrasts(color, bg_pick):
+            result["text"] = color
+            break
+    exclude = {result.get("background"), result.get("text")}
+    for color, _n in accent_votes.most_common():
+        if color not in exclude:
+            result["accent"] = color
+            break
+    return result
+
+
+_SAMPLED_TO_SCHEME_SLOT = {"background": "lt1", "text": "dk1", "accent": "accent1"}
+
+
+def _patch_theme_colors(slide_master, sampled: dict) -> None:
+    """Overwrites the master's theme `<a:clrScheme>` entries for
+    lt1/dk1/accent1 with the colors `_sample_deck_colors` actually found
+    in the deck's real content, so a later plain `_theme_colors()` read
+    (e.g. once this file's own slides have been stripped by
+    `derive_template` and there's nothing left to sample) picks up the
+    sampled palette instead of the scheme's original, possibly-unused
+    values. Normalizes to a literal `srgbClr` regardless of what was
+    there before (a literal color or a `sysClr`). A no-op for any slot
+    `sampled` didn't determine.
+
+    Mutates `slide_master.part.part_related_by(RT.THEME).blob` directly --
+    the theme part is a generic (non-XML-aware) `Part` in python-pptx, so
+    unlike an `XmlPart` there's no live `.element` tree to edit in place;
+    reassigning `.blob` is the actual persistence mechanism here.
+    """
+    try:
+        theme_part = slide_master.part.part_related_by(RT.THEME)
+        root = etree.fromstring(theme_part.blob)
+    except Exception:
+        return
+    ns = {"a": "http://schemas.openxmlformats.org/drawingml/2006/main"}
+    scheme = root.find(".//a:clrScheme", ns)
+    if scheme is None:
+        return
+    changed = False
+    for sampled_key, slot in _SAMPLED_TO_SCHEME_SLOT.items():
+        color = sampled.get(sampled_key)
+        if color is None:
+            continue
+        el = scheme.find(f"a:{slot}", ns)
+        if el is None:
+            continue
+        for child in list(el):
+            el.remove(child)
+        etree.SubElement(el, f"{_A_NS}srgbClr").set("val", str(color))
+        changed = True
+    if changed:
+        theme_part.blob = etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
+
+
 def derive_template(source_path: str, out_path: str) -> str:
     """Strips every slide out of an existing .pptx, leaving only its slide
     masters/layouts/theme -- so a large branded deck can be distilled once
@@ -674,13 +990,28 @@ def derive_template(source_path: str, out_path: str) -> str:
     community recipe of removing each slide's entry from the presentation's
     `<p:sldIdLst>` and dropping its relationship, which is what every slide
     deletion in python-pptx (there's no built-in method) is built on.
+
+    Before stripping, samples the real colors actually used across those
+    slides (`_sample_deck_colors`) and bakes them into the saved file's own
+    theme scheme (`_patch_theme_colors`) -- since those slides are about to
+    be gone, this is the only chance to capture them, and it means a later
+    plain `_theme_colors()` read of the *distilled* file (which is what
+    `render_rack` does once there are no slides left to sample) still
+    reflects the deck's actual visual style rather than its possibly-
+    unused declared theme.
     """
     prs = Presentation(source_path)
+    sampled = _sample_deck_colors(prs)
+
     slide_id_list = prs.slides._sldIdLst
     for slide_id in list(slide_id_list):
         r_id = slide_id.get(qn("r:id"))
         prs.part.drop_rel(r_id)
         slide_id_list.remove(slide_id)
+
+    if sampled:
+        _patch_theme_colors(prs.slide_masters[0], sampled)
+
     prs.save(out_path)
     return out_path
 
@@ -698,8 +1029,13 @@ def render_rack(report: ClusterReport, out_path: str, rack_label: str | None = N
     `template_path`, when given, is an existing .pptx: our rack slide is
     appended after any slides it already has, using a heuristically-chosen
     blank-ish layout from it, and a few chrome colors (title text, stat
-    header bars, background) switch to that template's theme colors. Slide
-    dimensions are always forced to this module's fixed 16:9 design
+    header bars, background) switch to colors sampled from that template's
+    real content (`_sample_deck_colors`) -- falling back to its declared
+    theme scheme (`_theme_colors`) for anything sampling couldn't
+    determine (typically because the template has no slides left to
+    sample from, e.g. one already run through `derive_template`, which
+    bakes its own sampled colors into the theme for exactly this case).
+    Slide dimensions are always forced to this module's fixed 16:9 design
     regardless of the template's own size -- if that differs from the
     template's native size, its *existing* slides (their shapes keep their
     original absolute positions) may look cropped or off-center against
@@ -710,6 +1046,7 @@ def render_rack(report: ClusterReport, out_path: str, rack_label: str | None = N
     """
     visible_stats = set(visible_stats) if visible_stats is not None else None
     prs = Presentation(template_path) if template_path else Presentation()
+    sampled = _sample_deck_colors(prs) if template_path else {}
     prs.slide_width = SLIDE_W
     prs.slide_height = SLIDE_H
 
@@ -730,9 +1067,16 @@ def render_rack(report: ClusterReport, out_path: str, rack_label: str | None = N
         ph._element.getparent().remove(ph._element)
 
     theme = _theme_colors(layout.slide_master) if template_path else {}
-    bg_color = theme.get("lt1", SLIDE_BG)
-    title_color = theme.get("dk1", TITLE_TEXT)
-    header_fill = theme.get("accent1", STAT_HEADER_FILL)
+    bg_color = sampled.get("background") or theme.get("lt1", SLIDE_BG)
+    title_color = sampled.get("text") or theme.get("dk1", TITLE_TEXT)
+    header_fill = sampled.get("accent") or theme.get("accent1", STAT_HEADER_FILL)
+    # The module's own default secondary-text colors (SUBTITLE_TEXT,
+    # RACK_LABEL_TEXT, NODE_LABEL_TEXT) assume a white background --
+    # against a sampled/themed background that may be dark, blending
+    # toward it from title_color keeps them a readable step away instead
+    # of a near-invisible dark-gray-on-black.
+    muted_text = _blend(title_color, bg_color, 0.35) if template_path else SUBTITLE_TEXT
+    label_text = title_color if template_path else None
 
     bg = _rect(slide, 0, 0, SLIDE_W, SLIDE_H, fill=bg_color)
     slide.shapes._spTree.remove(bg._element)
@@ -745,16 +1089,16 @@ def render_rack(report: ClusterReport, out_path: str, rack_label: str | None = N
     title = report.title or "Qumulo Cluster"
     _text(slide, Inches(0.55), Inches(0.28), Inches(9), Inches(0.4), title, Pt(24), title_color, bold=True)
     subtitle_bits = [b for b in [node_summary, _fmt(report.usable_tb, " TB Usable", 2)] if b]
-    _text(slide, Inches(0.55), Inches(0.68), Inches(9), Inches(0.3), " • ".join(subtitle_bits), Pt(13), SUBTITLE_TEXT)
+    _text(slide, Inches(0.55), Inches(0.68), Inches(9), Inches(0.3), " • ".join(subtitle_bits), Pt(13), muted_text)
 
     label = rack_label or "Rack 1"
-    rack_bottom = _draw_rack(slide, report, label)
+    rack_bottom = _draw_rack(slide, report, label, label_text=label_text, muted_text=muted_text)
     _draw_stats(slide, report, visible_stats, header_fill=header_fill)
 
     if report.source_file:
         source_y = min(rack_bottom, SLIDE_H - Inches(0.32))
         _text(slide, Inches(0.55), source_y, Inches(6), Inches(0.25),
-              f"Source: {report.source_file}", Pt(8), SUBTITLE_TEXT)
+              f"Source: {report.source_file}", Pt(8), muted_text)
 
     prs.save(out_path)
     return out_path

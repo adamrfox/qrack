@@ -31,8 +31,8 @@ python qrack.py cluster.pdf --new AH-96T:2  # override the new-node guess
 python qrack.py cluster.pdf --label "Row 3 / Rack 12"
 python qrack.py cluster.pdf --list-stats    # list this report's stat keys, no slide
 python qrack.py cluster.pdf --hide-stat iops --hide-stat encoding
-python qrack.py cluster.pdf --template corp-deck.pptx  # append to an existing deck, match its theme colors
-python derive_template.py corp-deck.pptx               # -> corp-deck.template.pptx, no slides, same theme
+python qrack.py cluster.pdf --template corp-deck.pptx  # append to an existing deck, matching its real colors
+python derive_template.py corp-deck.pptx               # -> corp-deck.template.pptx, no slides, same colors
 ```
 
 If you just want the rack slide styled like your company deck -- not literally
@@ -161,9 +161,10 @@ report could show (for a selection checklist). `POST /api/render` and
 `POST /api/preview` take the same body — that report (possibly edited),
 `rack_label`, an optional `visible_stats: [key, ...]` (omit or leave `null`
 to show everything), and an optional `template_base64` (an existing `.pptx`,
-base64-encoded, to append the rack slide to and pick up its theme colors —
-omit or leave `null` for the default styling) — `/api/render` streams back
-the `.pptx`, `/api/preview` streams back a PNG rendered from that exact
+base64-encoded, to append the rack slide to and match colors sampled from
+its real content — omit or leave `null` for the default styling) —
+`/api/render` streams back the `.pptx`, `/api/preview` streams back a PNG
+rendered from that exact
 `.pptx` via LibreOffice, so what you preview can't drift from what you'd
 download. No persistence — each request renders into its own temp
 file/directory that's deleted after streaming.

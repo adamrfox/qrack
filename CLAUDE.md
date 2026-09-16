@@ -88,12 +88,32 @@ Unparsed fields come back `None` rather than raising — callers must handle tha
   generation — do not flatten anything to an image.
 - **`template_path`**: when given, `Presentation(template_path)` is used as
   the base deck instead of a blank one — the rack slide is *appended* after
-  whatever slides the template already has, and picks up the template's
-  theme colors (title text = theme `dk1`, slide background = theme `lt1`,
-  stat-card headers = theme `accent1`, via `_theme_colors()`), falling back
-  to the normal palette constants for anything the theme doesn't define.
-  Functional colours (new-node green, Switch A/B cable colours) stay fixed
-  regardless of template, since they carry meaning. `_find_blank_layout()`
+  whatever slides the template already has, and picks up colors sampled
+  from that template's *real content* (`_sample_deck_colors()`) rather
+  than its declared theme scheme. This was a deliberate pivot away from
+  reading `_theme_colors()` (the theme's abstract `<a:clrScheme>`) as the
+  primary source: a real branded deck, especially a Google Slides export,
+  does not reliably paint its actual slides with its own declared theme
+  colors. Confirmed firsthand on a real customer deck whose theme scheme
+  said "navy text on white," while 6 of its 8 slides were actually solid
+  black backgrounds with white text and a teal/amber accent — the theme
+  colors were essentially decorative metadata nobody used. `_theme_colors()`
+  still exists and is used as the *fallback*, in two ways: (1) within
+  `_sample_deck_colors()` itself, to resolve a `schemeClr` reference found
+  on a real shape/run to its actual RGB, and (2) in `render_rack()`, for
+  whichever of background/text/accent sampling couldn't determine (e.g. a
+  template already stripped down to zero slides by `derive_template`,
+  which has nothing left to sample — see below for how that case is
+  handled). Functional colours (new-node green, Switch A/B cable colours)
+  stay fixed regardless of template, since they carry meaning.
+  Secondary/muted text (rack label, node model-code labels, subtitle, cable
+  legend) is *not* read from the sample directly — it's derived by
+  blending the sampled text color toward the sampled background
+  (`_blend(title_color, bg_color, 0.35)`), since the module's own default
+  colors for those (`SUBTITLE_TEXT`, `RACK_LABEL_TEXT`, `NODE_LABEL_TEXT`)
+  assume a white background and would be nearly invisible against a
+  legitimately dark one (also caught firsthand, from the same deck above).
+  `_find_blank_layout()`
   picks the emptiest layout in the template (preferring one literally named
   "blank") by counting non-content placeholders (date/footer/slide-number
   don't count) — there's no schema flag for "this is the blank layout," so
@@ -122,26 +142,73 @@ Unparsed fields come back `None` rather than raising — callers must handle tha
 - **Known limitation:** the slide is always fixed to 13.333"×7.5" (16:9), so
   a 4:3 template gets its aspect ratio silently overridden. Not worth
   handling until someone actually hits it.
+- `_sample_deck_colors(prs) -> dict` returns up to
+  `{'background':, 'text':, 'accent':}` as `RGBColor`, sourced from a
+  template's *real* slides, not its theme scheme:
+  - `background`: the most common effective background across all slides
+    — explicit slide/layout/master `<p:bg>`, or (very common on a Google
+    Slides export, which routinely fakes a background this way instead of
+    using the real OOXML mechanism) a plain shape sized to exactly cover
+    the slide, via `_full_bleed_fill_color`.
+  - `text`: the most common color on a title placeholder, per slide — its
+    own run color if set, else the layout's default style for that
+    placeholder (`_layout_title_default_color`), since a title's *run*
+    frequently carries no override at all and the actual styling lives on
+    the layout (again, routine on a Google Slides export). Rejected if it
+    doesn't contrast against the winning `background` (`_contrasts`, a
+    lightness-gap check) — background and text are tallied independently
+    across all slides, so without this guard they can land on the *same*
+    color when a deck's most-common title color and most-common background
+    happen to come from different subsets of slides (seen firsthand: an
+    all-white "text" pick on an all-white "background" pick, an invisible
+    title, from a deck that both used white titles on a few dark slides
+    and was mostly white overall).
+  - `accent`: the most common *non-neutral* color (`_is_neutral_color` — a
+    strict 0.4 saturation floor, tuned after a too-loose 0.15 let a
+    desaturated navy text shade outrank a deck's actual bright highlight
+    color) among all text runs and shape fills, excluding whichever color
+    already won `background`/`text`.
+  Every color goes through `_resolve_color_format`, which handles both a
+  literal RGB value and a theme (`schemeClr`) reference — including the
+  *semantic* `tx1`/`bg1`/`tx2`/`bg2` slots real content overwhelmingly
+  uses, resolved via that slide's own master's `_color_map` (its
+  `<p:clrMap>`), never assumed to be a fixed `tx1`→`dk1`/`bg1`→`lt1`
+  mapping, since a dark-background master can invert it. This is all
+  still a heuristic, like `_find_blank_layout()` — "most common" is a
+  proxy for "what a viewer actually associates with this deck," not a
+  guarantee, and a deck that genuinely uses two accent colors about
+  equally will pick whichever the `Counter` happens to see first on a tie.
 - `derive_template(source_path: str, out_path: str) -> str` strips every
   slide out of an existing `.pptx` via the standard python-pptx recipe
   (remove each `<p:sldId>` from `prs.slides._sldIdLst` and `drop_rel` its
   relationship — there's no public "delete slide" API), leaving only the
-  masters/layouts/theme that `template_path` above actually reads. Meant as
-  a one-time distillation step: point it at someone's real 40-slide branded
-  deck once, get back a small style-only file, use *that* as `template_path`
-  from then on instead of carrying the original deck's slides along on
-  every render. Verified against a deck with images and speaker notes, not
-  just a bare theme file — those get dropped along with their slides.
+  masters/layouts/theme. Meant as a one-time distillation step: point it at
+  someone's real 40-slide branded deck once, get back a small style-only
+  file, use *that* as `template_path` from then on instead of carrying the
+  original deck's slides along on every render. Verified against a deck
+  with images and speaker notes, not just a bare theme file — those get
+  dropped along with their slides. Before stripping, it also runs
+  `_sample_deck_colors()` on the *original* slides and bakes the result
+  into the saved file's own `<a:clrScheme>` (`_patch_theme_colors`,
+  overwriting `lt1`/`dk1`/`accent1`) — since those slides are about to be
+  gone, this is the only chance to capture them, and it's what makes a
+  later plain `_theme_colors()` read of the *distilled* file (all
+  `render_rack` can do once there's nothing left to sample) still reflect
+  the deck's actual visual style. `_patch_theme_colors` reassigns the
+  theme part's `.blob` directly rather than mutating an `.element` tree —
+  the theme part loads as a generic (non-XML-aware) python-pptx `Part`,
+  which has no live element to edit in place; `.blob` reassignment is the
+  actual persistence mechanism for that part type.
 
 ### `qrack.py` (CLI)
 
 `python qrack.py cluster.pdf [-o out.pptx] [--json] [--new CODE:N] [--label STR]
 [--hide-stat KEY] [--list-stats] [--template FILE.pptx]`
 — `--json` dumps parsed config; `--new AH-96T:2` overrides the new-node guess;
-`--template` appends the rack slide to an existing deck and picks up its
-theme colors (see `render_rack`'s `template_path` above); a bad/missing
-template path is caught and re-raised as a clean `SystemExit`, not a raw
-`pptx` traceback.
+`--template` appends the rack slide to an existing deck and picks up colors
+sampled from its real content (see `render_rack`'s `template_path` above);
+a bad/missing template path is caught and re-raised as a clean
+`SystemExit`, not a raw `pptx` traceback.
 
 ### `derive_template.py` (CLI)
 
