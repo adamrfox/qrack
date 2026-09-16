@@ -54,12 +54,18 @@ class RenderRequest(BaseModel):
         None, description="Stat keys to show in the stats panel (see /api/parse's available_stats). Omit or null shows everything."
     )
     template_base64: str | None = Field(
-        None, description="An existing .pptx, base64-encoded, to append the rack slide to and pick up its theme colors from. Omit or null for no template."
+        None, description="An existing .pptx, base64-encoded, to append the rack slide to and match colors sampled from its real content. Omit or null for no template."
+    )
+    template_slide: int | None = Field(
+        None, description="1-based slide number in the template to sample colors from instead of the whole deck. Only meaningful alongside a template_base64 that still has its original slides."
     )
 
 
 class DeriveTemplateRequest(BaseModel):
     template_base64: str = Field(..., description="An existing .pptx, base64-encoded, to strip down to just its theme/layouts.")
+    template_slide: int | None = Field(
+        None, description="1-based slide number to sample colors from instead of the whole deck."
+    )
 
 
 def _reject_if_not_a_sizing_report(report: ClusterReport) -> None:
@@ -154,7 +160,9 @@ def api_derive_template(req: DeriveTemplateRequest):
             raise HTTPException(422, "No template provided.")
         with tempfile.NamedTemporaryFile(suffix=".pptx") as out_tmp:
             try:
-                derive_template(template_path, out_tmp.name)
+                derive_template(template_path, out_tmp.name, slide_index=req.template_slide)
+            except ValueError as exc:
+                raise HTTPException(422, str(exc)) from exc
             except Exception as exc:
                 raise HTTPException(422, f"Couldn't use that file as a template: {exc}") from exc
             derived_bytes = Path(out_tmp.name).read_bytes()
@@ -171,10 +179,14 @@ def api_render(req: RenderRequest):
     try:
         with _resolve_template(req.template_base64) as template_path:
             render_rack(report, tmp.name, rack_label=req.rack_label or None,
-                        visible_stats=req.visible_stats, template_path=template_path)
+                        visible_stats=req.visible_stats, template_path=template_path,
+                        template_slide=req.template_slide)
     except HTTPException:
         os.unlink(tmp.name)
         raise
+    except ValueError as exc:
+        os.unlink(tmp.name)
+        raise HTTPException(422, str(exc)) from exc
     except Exception as exc:
         os.unlink(tmp.name)
         if req.template_base64:
@@ -204,9 +216,12 @@ def api_preview(req: RenderRequest):
         try:
             with _resolve_template(req.template_base64) as template_path:
                 render_rack(report, pptx_path, rack_label=req.rack_label or None,
-                            visible_stats=req.visible_stats, template_path=template_path)
+                            visible_stats=req.visible_stats, template_path=template_path,
+                            template_slide=req.template_slide)
         except HTTPException:
             raise
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
         except Exception as exc:
             if req.template_base64:
                 raise HTTPException(422, f"Couldn't use that template: {exc}") from exc

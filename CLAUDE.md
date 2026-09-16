@@ -79,8 +79,9 @@ Unparsed fields come back `None` rather than raising — callers must handle tha
 ### `qumulo_rack.renderer`
 
 - `render_rack(report: ClusterReport, out_path: str, rack_label: str|None=None,
-  visible_stats=None, template_path: str|None=None) -> str` writes the
-  `.pptx` to `out_path` and returns it.
+  visible_stats=None, template_path: str|None=None,
+  template_slide: int|None=None) -> str` writes the `.pptx` to `out_path`
+  and returns it.
 - Palette is module-level constants at the top of the file (node / switch /
   cable colours). Centralize any theming there.
 - Slide is fixed 13.333" × 7.5" (16:9). All shapes are native `python-pptx`
@@ -178,7 +179,18 @@ Unparsed fields come back `None` rather than raising — callers must handle tha
   proxy for "what a viewer actually associates with this deck," not a
   guarantee, and a deck that genuinely uses two accent colors about
   equally will pick whichever the `Counter` happens to see first on a tie.
-- `derive_template(source_path: str, out_path: str) -> str` strips every
+  Takes an optional `slide_index` (1-based) to sample a single specific
+  slide instead of majority-voting across the deck — useful for a deck
+  that genuinely has more than one distinct look (confirmed on a real
+  customer deck: most slides teal-accented, a few amber, one navy — the
+  deck-wide vote picks whichever is most common, but `slide_index` lets
+  you pin an exact one instead). Raises `ValueError` for an out-of-range
+  index, including against a deck with zero slides (e.g. one already
+  stripped by `derive_template` — there's nothing left to sample against,
+  so the slide choice has to be made *before* stripping, either by passing
+  `slide_index` to `derive_template` itself or, in the web app, when
+  `template_base64` still carries the deck's original slides).
+- `derive_template(source_path: str, out_path: str, slide_index: int | None = None) -> str` strips every
   slide out of an existing `.pptx` via the standard python-pptx recipe
   (remove each `<p:sldId>` from `prs.slides._sldIdLst` and `drop_rel` its
   relationship — there's no public "delete slide" API), leaving only the
@@ -203,18 +215,22 @@ Unparsed fields come back `None` rather than raising — callers must handle tha
 ### `qrack.py` (CLI)
 
 `python qrack.py cluster.pdf [-o out.pptx] [--json] [--new CODE:N] [--label STR]
-[--hide-stat KEY] [--list-stats] [--template FILE.pptx]`
+[--hide-stat KEY] [--list-stats] [--template FILE.pptx] [--template-slide N]`
 — `--json` dumps parsed config; `--new AH-96T:2` overrides the new-node guess;
 `--template` appends the rack slide to an existing deck and picks up colors
 sampled from its real content (see `render_rack`'s `template_path` above);
-a bad/missing template path is caught and re-raised as a clean
-`SystemExit`, not a raw `pptx` traceback.
+`--template-slide N` samples from just that 1-based slide instead of the
+whole deck (requires `--template`; a plain `SystemExit` if given without
+it) — a bad/missing template path, or an out-of-range `--template-slide`,
+is caught and re-raised as a clean `SystemExit`, not a raw `pptx`/`ValueError`
+traceback.
 
 ### `derive_template.py` (CLI)
 
-`python derive_template.py corp-deck.pptx [-o corp-template.pptx]` — thin
-wrapper around `renderer.derive_template`; same clean-`SystemExit` handling
-for a bad input path.
+`python derive_template.py corp-deck.pptx [-o corp-template.pptx] [--slide N]`
+— thin wrapper around `renderer.derive_template`; `--slide N` samples from
+just that 1-based slide instead of the whole deck; same clean-`SystemExit`
+handling for a bad input path or an out-of-range `--slide`.
 
 ## Domain facts the code encodes (don't rederive these wrong)
 
@@ -292,8 +308,12 @@ distillation shouldn't require a round-trip through the CLI:
   message when it isn't a parseable Qumulo report.
 - `POST /api/render` and `POST /api/preview` take the same body — `{report`
   (possibly edited by the user), `rack_label`, `visible_stats`,
-  `template_base64}` (the last is optional — a `.pptx`, base64-encoded, to
-  append the rack slide to; omit or `null` for the default styling) — and
+  `template_base64`, `template_slide}` (the last two are optional — a
+  `.pptx`, base64-encoded, to append the rack slide to; `template_slide` a
+  1-based slide number to sample from instead of the whole deck, only
+  meaningful when `template_base64` still has its original slides, since
+  sampling has nothing to work with once they're stripped; omit or `null`
+  either for the default styling) — and
   differ only in what they stream back: `/api/render` streams the `.pptx`
   with `Content-Disposition: attachment`; `/api/preview` renders that *same*
   `.pptx` to a PNG and streams that instead, so the preview can never drift
@@ -307,12 +327,15 @@ distillation shouldn't require a round-trip through the CLI:
   - `_resolve_template()` decodes/validates the base64 (size cap, zip magic
     bytes `PK\x03\x04`) into a temp file and yields its path (or `None`);
     template-caused render failures come back as `422` rather than `500`.
-- `POST /api/derive-template` takes `{template_base64}` and returns
+- `POST /api/derive-template` takes `{template_base64, template_slide}`
+  (the second optional, same meaning as above) and returns
   `{template_base64: <stripped>}` — the web equivalent of
   `derive_template.py` (same underlying function), for the UI's "style
   only" checkbox (see below): strip an uploaded deck down to just its
   theme/layouts before it's used or persisted, so the browser never has to
-  hold onto (or `localStorage`-persist) the original full deck.
+  hold onto (or `localStorage`-persist) the original full deck. An
+  out-of-range `template_slide` comes back as a `422` with
+  `_sample_deck_colors`'s own `ValueError` message.
   - **`/api/preview`'s rasterization is a two-step pipeline, not a single
     `soffice --convert-to png`:** our rack slide is always the *last* slide
     in the deck (appended after any template slides), but `soffice`'s PNG
@@ -332,9 +355,20 @@ then calls preview and/or render. The template picker has a "style only"
 checkbox (checked by default) that, when a file is chosen, first round-trips
 it through `/api/derive-template` before storing/using it — so by default
 the browser only ever persists the small distilled file, not the original
-branded deck. The checkbox is read at file-selection time only (toggling it
-afterward needs re-choosing the file, since the raw upload isn't kept
-around once processed).
+branded deck — plus an optional "Match slide #" number field for a deck
+with more than one distinct look. Both the checkbox and the slide number
+are read at file-selection time only (changing either afterward needs
+re-choosing the file, since the raw upload isn't kept around once
+processed). What happens with the slide number depends on the checkbox:
+- **Style only checked**: the slide number goes to that one
+  `/api/derive-template` call and is then done with — `currentTemplateSlide`
+  resets to `null` afterward, since the distilled result has no slides
+  left for a later request to sample from anyway.
+- **Style only unchecked** (raw mode, original deck kept): the slide
+  number has to be resent on *every* `/api/render`/`/api/preview` call
+  alongside the raw `template_base64`, since sampling happens fresh each
+  time against the full deck (`currentTemplateIsRaw` tracks this so
+  `buildPayload()` knows whether to include it).
 
 `ClusterReport.from_dict()` / `NodeModel.from_dict()` (parser.py) rebuild the
 dataclasses from that edited JSON; `parse_report(source, *, name=None)`

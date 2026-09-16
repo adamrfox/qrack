@@ -3,6 +3,7 @@
 
     python qrack.py cluster.pdf [-o out.pptx] [--json] [--new CODE:N] [--label STR]
                                  [--hide-stat KEY] [--list-stats] [--template FILE.pptx]
+                                 [--template-slide N]
 """
 
 import argparse
@@ -51,8 +52,11 @@ def main(argv=None) -> int:
     ap.add_argument("--list-stats", action="store_true",
                      help="list this report's available stat keys (for --hide-stat) and exit; no slide is produced")
     ap.add_argument("--template", metavar="FILE.pptx",
-                     help="an existing .pptx to append the rack slide to, picking up its theme colors "
-                          "(functional colors -- new-node green, cable colors -- stay fixed regardless)")
+                     help="an existing .pptx to append the rack slide to, matching colors sampled from its "
+                          "real slides (functional colors -- new-node green, cable colors -- stay fixed regardless)")
+    ap.add_argument("--template-slide", type=int, metavar="N",
+                     help="sample template colors from this 1-based slide number instead of the whole deck "
+                          "(useful when the template has more than one distinct look); requires --template")
     args = ap.parse_args(argv)
 
     report = parse_report(args.pdf)
@@ -89,10 +93,15 @@ def main(argv=None) -> int:
             raise SystemExit(f"--hide-stat: unknown key(s) {sorted(unknown)}; see --list-stats for valid keys")
         visible_stats = all_keys - set(args.hide_stat)
 
+    if args.template_slide is not None and not args.template:
+        raise SystemExit("--template-slide requires --template")
+
     out_path = args.out or (args.pdf.rsplit(".", 1)[0] + ".rack.pptx")
     try:
         render_rack(report, out_path, rack_label=args.label, visible_stats=visible_stats,
-                    template_path=args.template)
+                    template_path=args.template, template_slide=args.template_slide)
+    except ValueError as exc:
+        raise SystemExit(f"--template-slide: {exc}")
     except Exception as exc:
         if args.template:
             raise SystemExit(f"--template: couldn't open {args.template!r} as a .pptx: {exc}")

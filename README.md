@@ -33,6 +33,7 @@ python qrack.py cluster.pdf --list-stats    # list this report's stat keys, no s
 python qrack.py cluster.pdf --hide-stat iops --hide-stat encoding
 python qrack.py cluster.pdf --template corp-deck.pptx  # append to an existing deck, matching its real colors
 python derive_template.py corp-deck.pptx               # -> corp-deck.template.pptx, no slides, same colors
+python derive_template.py corp-deck.pptx --slide 5      # match slide 5 specifically, not the whole deck
 ```
 
 If you just want the rack slide styled like your company deck -- not literally
@@ -41,6 +42,14 @@ its theme/layouts (no slides, so it's small), and pass *that* file as
 `--template` instead. Every `qrack.py` render then produces a single-slide
 `.pptx` with the matching colors, rather than your whole original deck plus
 one slide.
+
+Some decks look different from slide to slide (a dark title slide, lighter
+content slides, a differently-accented section divider, ...). By default,
+colors are picked by majority vote across the whole deck; `--slide N` (on
+either command) pins it to one specific 1-based slide instead. On
+`derive_template.py` that slide choice has to be made up front, since the
+distilled file has no slides left afterward for `qrack.py --template` to
+sample from later.
 
 Dependencies: `pip install pdfplumber python-pptx`.
 
@@ -160,27 +169,35 @@ parsed config for the confirm step, plus every stat key/label/section this
 report could show (for a selection checklist). `POST /api/render` and
 `POST /api/preview` take the same body — that report (possibly edited),
 `rack_label`, an optional `visible_stats: [key, ...]` (omit or leave `null`
-to show everything), and an optional `template_base64` (an existing `.pptx`,
+to show everything), an optional `template_base64` (an existing `.pptx`,
 base64-encoded, to append the rack slide to and match colors sampled from
-its real content — omit or leave `null` for the default styling) —
-`/api/render` streams back the `.pptx`, `/api/preview` streams back a PNG
-rendered from that exact
-`.pptx` via LibreOffice, so what you preview can't drift from what you'd
-download. No persistence — each request renders into its own temp
-file/directory that's deleted after streaming.
+its real content — omit or leave `null` for the default styling), and an
+optional `template_slide` (a 1-based slide number to sample from instead of
+the whole deck — only meaningful when `template_base64` still has its
+original slides) — `/api/render` streams back the `.pptx`, `/api/preview`
+streams back a PNG rendered from that exact `.pptx` via LibreOffice, so
+what you preview can't drift from what you'd download. No persistence —
+each request renders into its own temp file/directory that's deleted after
+streaming.
 
-`POST /api/derive-template` takes `{template_base64}` and returns
+`POST /api/derive-template` takes `{template_base64, template_slide}` (the
+second optional, same meaning as above) and returns
 `{template_base64: <stripped>}` — the same slide-stripping as
 `derive_template.py`, exposed for the web UI's "style only" checkbox below.
 
 The web UI has an optional "PowerPoint template" file picker alongside the
-sizing PDF upload, with a "style only" checkbox (checked by default): when
-checked, a chosen template is distilled via `/api/derive-template` before
-it's used, so what actually gets stored and sent on every render is the
-small theme-only file, not the original branded deck. Uncheck it to use the
-template as-is and have the rack slide inserted after its existing slides
-instead. Either way, the resulting template is remembered in the browser
-(`localStorage`) so you don't need to re-upload it for every report.
+sizing PDF upload, with a "style only" checkbox (checked by default) and a
+"Match slide #" number field for a deck that looks different from slide to
+slide: when "style only" is checked, a chosen template is distilled via
+`/api/derive-template` before it's used, so what actually gets stored and
+sent on every render is the small theme-only file, not the original
+branded deck, and any slide number applies to that one-time distillation.
+Uncheck it to use the template as-is and have the rack slide inserted
+after its existing slides instead — a slide number here gets resent on
+every render/preview, since the full deck (and its other slides to sample
+from) is still around. Either way, the resulting template is remembered in
+the browser (`localStorage`) so you don't need to re-upload it for every
+report.
 
 ### Updating / stopping
 

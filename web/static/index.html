@@ -182,6 +182,11 @@
         <input type="checkbox" id="template-style-only" checked>
         Style only &mdash; strip the template's own slides, just match its look
       </label>
+      <div style="display:flex; align-items:center; gap:0.5rem; margin-bottom:0.5rem;">
+        <label for="template-slide" class="hint" style="margin:0; white-space:nowrap;">Match slide # (optional):</label>
+        <input type="number" id="template-slide" min="1" placeholder="auto"
+               style="width:4.5rem; padding:0.3rem 0.4rem; border:1px solid var(--border); border-radius:4px; font:inherit;">
+      </div>
       <div class="template-row">
         <button type="button" class="secondary" id="template-btn">Choose file&hellip;</button>
         <span id="template-name" class="hint">No template selected &mdash; using default styling</span>
@@ -190,8 +195,10 @@
       <input type="file" id="template-input" accept=".pptx" hidden>
       <div class="hint" style="margin-top:0.3rem">
         With "style only" checked, the rack slide just picks up the template's theme colors. Unchecked,
-        it's appended after the template's own slides instead. Remembered in this browser (applies when
-        you pick a file &mdash; toggling it afterward needs re-choosing the file).
+        it's appended after the template's own slides instead. Some decks look different from slide to
+        slide &mdash; leave "Match slide #" blank to match the deck's overall look, or give a specific
+        slide number to match just that one. Remembered in this browser (both settings apply when you
+        pick a file &mdash; changing them afterward needs re-choosing the file).
       </div>
     </div>
 
@@ -227,6 +234,7 @@
   const templateName = document.getElementById('template-name');
   const templateClearBtn = document.getElementById('template-clear-btn');
   const templateStyleOnlyCheckbox = document.getElementById('template-style-only');
+  const templateSlideInput = document.getElementById('template-slide');
   const previewBtn = document.getElementById('preview-btn');
   const previewCard = document.getElementById('preview-card');
   const previewImg = document.getElementById('preview-img');
@@ -241,6 +249,13 @@
   let currentAvailableStats = [];
   let currentTemplateBase64 = null;
   let currentTemplateName = null;
+  // Whether currentTemplateBase64 is the raw upload (still has its own
+  // slides, so a slide number must be resent on every render/preview so
+  // the server can re-sample) or an already-distilled, 0-slide result
+  // (the slide choice was already "spent" at distill time -- resending it
+  // would just make sampling fail against an empty deck).
+  let currentTemplateIsRaw = false;
+  let currentTemplateSlide = null;
 
   function showError(msg) {
     errorBox.textContent = msg;
@@ -368,6 +383,8 @@
       if (parsed && parsed.data && parsed.name) {
         currentTemplateBase64 = parsed.data;
         currentTemplateName = parsed.name;
+        currentTemplateIsRaw = !!parsed.isRaw;
+        currentTemplateSlide = parsed.slide || null;
       }
     } catch {
       // ignore -- private browsing / storage disabled / corrupt entry
@@ -377,8 +394,10 @@
   function saveStoredTemplate() {
     try {
       if (currentTemplateBase64) {
-        localStorage.setItem(TEMPLATE_STORAGE_KEY,
-          JSON.stringify({ name: currentTemplateName, data: currentTemplateBase64 }));
+        localStorage.setItem(TEMPLATE_STORAGE_KEY, JSON.stringify({
+          name: currentTemplateName, data: currentTemplateBase64,
+          isRaw: currentTemplateIsRaw, slide: currentTemplateSlide,
+        }));
       } else {
         localStorage.removeItem(TEMPLATE_STORAGE_KEY);
       }
@@ -395,6 +414,18 @@
       templateName.textContent = 'No template selected — using default styling';
       templateClearBtn.hidden = true;
     }
+    // Reflects the slide number actually in effect (raw mode) or blank
+    // (style-only mode already "spent" its slide choice at distill time,
+    // or no template at all) -- editing it only matters for the *next*
+    // file you choose, per the field's documented behavior.
+    templateSlideInput.value = (currentTemplateIsRaw && currentTemplateSlide) ? currentTemplateSlide : '';
+  }
+
+  function getRequestedTemplateSlide() {
+    const raw = templateSlideInput.value.trim();
+    if (!raw) return null;
+    const n = parseInt(raw, 10);
+    return (Number.isInteger(n) && n >= 1) ? n : null;
   }
 
   function arrayBufferToBase64(buf) {
@@ -411,11 +442,11 @@
   // equivalent of derive_template.py) -- so the browser only ever has to
   // hold onto (and persist) the small distilled file, not the original
   // branded deck, when "style only" is checked.
-  async function deriveTemplateOnServer(base64) {
+  async function deriveTemplateOnServer(base64, slideIndex) {
     const resp = await fetch('/api/derive-template', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ template_base64: base64 }),
+      body: JSON.stringify({ template_base64: base64, template_slide: slideIndex }),
     });
     if (!resp.ok) {
       const body = await resp.json().catch(() => ({}));
@@ -432,13 +463,27 @@
     if (!file) return;
     clearError();
     const styleOnly = templateStyleOnlyCheckbox.checked;
+    const slideIndex = getRequestedTemplateSlide();
     await withButtonBusy(templateBtn, styleOnly ? 'Distilling…' : 'Reading…', async () => {
       try {
         const buf = await file.arrayBuffer();
         let base64 = arrayBufferToBase64(buf);
-        if (styleOnly) base64 = await deriveTemplateOnServer(base64);
+        if (styleOnly) {
+          // The slide choice is spent here -- the distilled result has no
+          // slides left, so there's nothing to re-sample on later renders.
+          base64 = await deriveTemplateOnServer(base64, slideIndex);
+          currentTemplateIsRaw = false;
+          currentTemplateSlide = null;
+        } else {
+          // Raw mode keeps the deck's own slides, so the slide choice has
+          // to be resent on every render/preview for the server to
+          // re-sample from.
+          currentTemplateIsRaw = true;
+          currentTemplateSlide = slideIndex;
+        }
         currentTemplateBase64 = base64;
-        currentTemplateName = file.name + (styleOnly ? ' (style only)' : '');
+        currentTemplateName = file.name + (styleOnly ? ' (style only)' : '')
+          + (slideIndex ? ` [slide ${slideIndex}]` : '');
         updateTemplateUi();
         saveStoredTemplate();
         scheduleAutoPreview();
@@ -450,6 +495,8 @@
   templateClearBtn.addEventListener('click', () => {
     currentTemplateBase64 = null;
     currentTemplateName = null;
+    currentTemplateIsRaw = false;
+    currentTemplateSlide = null;
     updateTemplateUi();
     saveStoredTemplate();
     scheduleAutoPreview();
@@ -526,6 +573,9 @@
       rack_label: rackLabelInput.value || null,
       visible_stats: visibleStats,
       template_base64: currentTemplateBase64 || null,
+      // Only meaningful in raw mode -- a style-only distilled template has
+      // no slides left for the server to re-sample from.
+      template_slide: currentTemplateIsRaw ? currentTemplateSlide : null,
     };
   }
 

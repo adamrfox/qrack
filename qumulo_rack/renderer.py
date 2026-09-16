@@ -835,7 +835,7 @@ def _title_placeholder(slide):
     return None
 
 
-def _sample_deck_colors(prs: Presentation) -> dict:
+def _sample_deck_colors(prs: Presentation, slide_index: int | None = None) -> dict:
     """Samples colors actually used across the deck's real slides, rather
     than reading the theme's abstract color scheme (`_theme_colors`) -- a
     real branded deck, especially a Google Slides export, doesn't reliably
@@ -861,12 +861,26 @@ def _sample_deck_colors(prs: Presentation) -> dict:
     Every color is resolved through that *slide's own* master (schemeClr
     references go through that master's `_color_map`, so this stays
     correct even across a deck with more than one master/theme).
+
+    `slide_index`, when given, is a 1-based slide number that restricts
+    sampling to that single slide instead of majority-voting across the
+    whole deck -- for a deck that genuinely has more than one distinct
+    look (e.g. alternating section-header and content styles), so the
+    "most common" heuristic isn't the only option. Raises `ValueError` if
+    out of range for the deck (including a deck with no slides at all,
+    e.g. one already run through `derive_template`).
     """
+    slides = list(prs.slides)
+    if slide_index is not None:
+        if not slides or not (1 <= slide_index <= len(slides)):
+            raise ValueError(f"slide {slide_index} is out of range -- this deck has {len(slides)} slide(s)")
+        slides = [slides[slide_index - 1]]
+
     bg_votes: Counter = Counter()
     title_votes: Counter = Counter()
     accent_votes: Counter = Counter()
 
-    for slide in prs.slides:
+    for slide in slides:
         layout = slide.slide_layout
         master = layout.slide_master
         theme_colors = _theme_colors(master)
@@ -976,7 +990,7 @@ def _patch_theme_colors(slide_master, sampled: dict) -> None:
         theme_part.blob = etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
 
 
-def derive_template(source_path: str, out_path: str) -> str:
+def derive_template(source_path: str, out_path: str, slide_index: int | None = None) -> str:
     """Strips every slide out of an existing .pptx, leaving only its slide
     masters/layouts/theme -- so a large branded deck can be distilled once
     into a small, content-free file for `render_rack`'s `template_path`
@@ -999,9 +1013,16 @@ def derive_template(source_path: str, out_path: str) -> str:
     `render_rack` does once there are no slides left to sample) still
     reflects the deck's actual visual style rather than its possibly-
     unused declared theme.
+
+    `slide_index`, when given, is a 1-based slide number in the *source*
+    deck to sample from instead of majority-voting across all of it -- see
+    `_sample_deck_colors`. Only meaningful here, against the original
+    deck's real slides; there's nothing left to sample once this function
+    is done stripping them, which is exactly why this is where that choice
+    has to be made.
     """
     prs = Presentation(source_path)
-    sampled = _sample_deck_colors(prs)
+    sampled = _sample_deck_colors(prs, slide_index=slide_index)
 
     slide_id_list = prs.slides._sldIdLst
     for slide_id in list(slide_id_list):
@@ -1020,7 +1041,8 @@ def derive_template(source_path: str, out_path: str) -> str:
 
 
 def render_rack(report: ClusterReport, out_path: str, rack_label: str | None = None,
-                 visible_stats=None, template_path: str | None = None) -> str:
+                 visible_stats=None, template_path: str | None = None,
+                 template_slide: int | None = None) -> str:
     """`visible_stats`, when given, is an iterable of stat keys (see
     `available_stats`) -- only those appear in the stats panel, and a
     section left with none of its stats selected is omitted entirely.
@@ -1035,18 +1057,25 @@ def render_rack(report: ClusterReport, out_path: str, rack_label: str | None = N
     determine (typically because the template has no slides left to
     sample from, e.g. one already run through `derive_template`, which
     bakes its own sampled colors into the theme for exactly this case).
-    Slide dimensions are always forced to this module's fixed 16:9 design
-    regardless of the template's own size -- if that differs from the
-    template's native size, its *existing* slides (their shapes keep their
-    original absolute positions) may look cropped or off-center against
-    the new canvas size. Proportionally rescaling this renderer's geometry
-    to match an arbitrary template size is a real but not-yet-built
-    follow-up; for now this only reliably looks right for a same-aspect-
-    ratio (16:9) template, or one with no existing slides to clash with.
+    `template_slide`, when given, is a 1-based slide number that restricts
+    that sampling to just that one slide instead of majority-voting across
+    the whole template -- useful for a deck with more than one distinct
+    look (raises `ValueError` if out of range, including a template with
+    no slides left, e.g. one already run through `derive_template` --
+    against a distilled template, pick the slide at `derive_template` time
+    instead). Slide dimensions are always forced to this module's fixed
+    16:9 design regardless of the template's own size -- if that differs
+    from the template's native size, its *existing* slides (their shapes
+    keep their original absolute positions) may look cropped or
+    off-center against the new canvas size. Proportionally rescaling this
+    renderer's geometry to match an arbitrary template size is a real but
+    not-yet-built follow-up; for now this only reliably looks right for a
+    same-aspect-ratio (16:9) template, or one with no existing slides to
+    clash with.
     """
     visible_stats = set(visible_stats) if visible_stats is not None else None
     prs = Presentation(template_path) if template_path else Presentation()
-    sampled = _sample_deck_colors(prs) if template_path else {}
+    sampled = _sample_deck_colors(prs, slide_index=template_slide) if template_path else {}
     prs.slide_width = SLIDE_W
     prs.slide_height = SLIDE_H
 
