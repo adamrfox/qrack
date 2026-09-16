@@ -147,10 +147,22 @@ Unparsed fields come back `None` rather than raising — callers must handle tha
   `{'background':, 'text':, 'accent':}` as `RGBColor`, sourced from a
   template's *real* slides, not its theme scheme:
   - `background`: the most common effective background across all slides
-    — explicit slide/layout/master `<p:bg>`, or (very common on a Google
-    Slides export, which routinely fakes a background this way instead of
-    using the real OOXML mechanism) a plain shape sized to exactly cover
-    the slide, via `_full_bleed_fill_color`.
+    — explicit `<p:bg>`, or (very common on a Google Slides export, which
+    routinely fakes a background this way instead of using the real OOXML
+    mechanism) a plain shape sized to exactly cover the slide
+    (`_full_bleed_fill_color`) — checked **per level**, slide then layout
+    then master, each level's full-bleed shape before falling through to
+    the *next* level's `<p:bg>`, not all three `<p:bg>`s before any
+    full-bleed shape. A full-bleed shape at a level visually covers
+    whatever `<p:bg>` that same level declares or inherits, so it has to
+    win at that level, not lose to a `<p:bg>` one level up. Got this
+    backwards originally and it mattered in practice: a real customer
+    deck's master had an unused, literally-never-visible white `<p:bg>`
+    that still out-prioritized the *layout's* actual painted navy
+    full-bleed background, because "does the master have a `<p:bg>`" was
+    checked before "does anything have a full-bleed shape" at all — nearly
+    half that deck's slides use a layout that's actually dark navy, not
+    the white this originally reported.
   - `text`: the most common color on a title placeholder, per slide — its
     own run color if set, else the layout's default style for that
     placeholder (`_layout_title_default_color`), since a title's *run*
@@ -179,6 +191,16 @@ Unparsed fields come back `None` rather than raising — callers must handle tha
   proxy for "what a viewer actually associates with this deck," not a
   guarantee, and a deck that genuinely uses two accent colors about
   equally will pick whichever the `Counter` happens to see first on a tie.
+  **Scope, explicitly**: this is 3 flat colors, nothing else — no logos or
+  other pictures, no footer/page-number text, no gradients (only a flat
+  color is read off a gradient-filled shape's first stop), no decorative
+  shapes, no fonts. "Match this slide" means "use its background/title/
+  accent colors," not "reproduce its design" — confirmed against a real
+  template slide literally named "Slide Option - Dark with Logo," where
+  the fixed version correctly picks up its navy background and white
+  title but obviously doesn't carry over its logo, its rounded-rectangle
+  graphic pattern, or its footer. Reproducing any of those would be new,
+  separately-scoped work, not a bug in what's built today.
   Takes an optional `slide_index` (1-based) to sample a single specific
   slide instead of majority-voting across the deck — useful for a deck
   that genuinely has more than one distinct look (confirmed on a real

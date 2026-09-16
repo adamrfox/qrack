@@ -886,11 +886,20 @@ def _sample_deck_colors(prs: Presentation, slide_index: int | None = None) -> di
         theme_colors = _theme_colors(master)
         color_map = _color_map(master)
 
+        # A full-bleed shape at a given level (slide/layout) visually
+        # covers whatever <p:bg> that same level declares (or inherits),
+        # so it has to be checked *before* falling through to the next
+        # level's <p:bg> -- not after every level's <p:bg> has already
+        # been tried. Got this backwards originally: a real deck had an
+        # unused, never-visible white master-level <p:bg> that still won
+        # over the layout's actual painted (navy) full-bleed background,
+        # simply because "master background" was checked before any
+        # full-bleed shape at all.
         bg = (_effective_background_color(slide.background, theme_colors, color_map)
-              or _effective_background_color(layout.background, theme_colors, color_map)
-              or _effective_background_color(master.background, theme_colors, color_map)
               or _full_bleed_fill_color(slide.shapes, prs.slide_width, prs.slide_height, theme_colors, color_map)
-              or _full_bleed_fill_color(layout.shapes, prs.slide_width, prs.slide_height, theme_colors, color_map))
+              or _effective_background_color(layout.background, theme_colors, color_map)
+              or _full_bleed_fill_color(layout.shapes, prs.slide_width, prs.slide_height, theme_colors, color_map)
+              or _effective_background_color(master.background, theme_colors, color_map))
         if bg:
             bg_votes[bg] += 1
 
