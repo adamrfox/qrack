@@ -716,6 +716,19 @@ def render_rack(report: ClusterReport, out_path: str, rack_label: str | None = N
     layout = _find_blank_layout(prs)
     slide = prs.slides.add_slide(layout)
 
+    # add_slide() clones the layout's own placeholders (title/subtitle/body/
+    # etc.) onto the new slide -- normal python-pptx behavior, meant for
+    # someone who's about to type into them. We never do that; every field
+    # on this slide is our own explicit shape. On a template whose only
+    # "blank-ish" layout still carries a few content placeholders (common
+    # on real branded decks -- unlike python-pptx's own default template,
+    # which has a true zero-placeholder "Blank" layout), those inherited
+    # placeholders sit empty on top of/behind our own shapes at whatever
+    # position and styling the layout gave them, which can visibly clash.
+    # Strip them all immediately; nothing here ever reads from them.
+    for ph in list(slide.placeholders):
+        ph._element.getparent().remove(ph._element)
+
     theme = _theme_colors(layout.slide_master) if template_path else {}
     bg_color = theme.get("lt1", SLIDE_BG)
     title_color = theme.get("dk1", TITLE_TEXT)

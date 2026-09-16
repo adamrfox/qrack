@@ -97,9 +97,27 @@ Unparsed fields come back `None` rather than raising — callers must handle tha
   picks the emptiest layout in the template (preferring one literally named
   "blank") by counting non-content placeholders (date/footer/slide-number
   don't count) — there's no schema flag for "this is the blank layout," so
-  this is a heuristic, not a guarantee, on an unusual template. Colors are
-  resolved into local variables and threaded through as function params,
-  never mutated on shared module state, since the web app can render
+  this is a heuristic, not a guarantee, on an unusual template. A real
+  branded deck (as opposed to python-pptx's own default template, which has
+  a genuine zero-placeholder "Blank" layout) commonly has *no* truly empty
+  layout at all, so even the least-bad one picked here can still carry a
+  few content placeholders (title/subtitle/body). `add_slide(layout)`
+  clones those onto our new slide — normal python-pptx behavior for
+  someone about to type into them, but we never do; every field on this
+  slide is our own explicit shape. Left alone, those empty placeholders
+  don't show up in a flattened render (PDF/PNG conversion, or `/api/preview`)
+  since they carry no visible content, but they absolutely show up the
+  moment the file is opened for editing in PowerPoint or Google Slides —
+  empty "click to add title/text" boxes sitting on top of or behind the
+  rack diagram and stats, right where the layout positioned them. Fixed by
+  stripping every inherited placeholder off the new slide immediately
+  after `add_slide()` (`for ph in list(slide.placeholders):
+  ph._element.getparent().remove(ph._element)`) — keep that in place if you
+  ever touch the slide-creation code, and don't assume a LibreOffice/PDF
+  screenshot proves a template is clean, the same lesson as the earlier
+  EMU-float saga above. Colors are resolved into local variables and
+  threaded through as function params, never mutated on shared module state,
+  since the web app can render
   concurrently.
 - **Known limitation:** the slide is always fixed to 13.333"×7.5" (16:9), so
   a 4:3 template gets its aspect ratio silently overridden. Not worth
