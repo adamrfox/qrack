@@ -3,11 +3,15 @@
 Deterministic geometry: every position is computed from the parsed config,
 never from randomness or wall-clock time. Shapes are native python-pptx
 rectangles / connectors / text boxes -- never flatten a slide to an image --
-with one deliberate, narrow exception: 1U node chassis use a bundled product
-photo (qumulo_rack/assets/) instead of the drawn server icon, by explicit
-product decision. The NEW-node highlight and the code label stay separate
-vector overlays on top of it, so those remain editable even though the
-chassis art itself isn't.
+with one deliberate, narrow exception: 1U and 2U node chassis use a bundled
+product photo (qumulo_rack/assets/) instead of the drawn server icon, by
+explicit product decision. Each photo is a specific real model's chassis,
+used generically for any node of that height regardless of its actual model
+code -- exact-per-model photos aren't worth the asset-maintenance burden.
+The NEW-node highlight and the code label stay separate vector overlays on
+top of it, so those remain editable even though the chassis art itself
+isn't. Any other height (3U+) falls back to the drawn vector server icon,
+since there's no bundled photo for it.
 """
 
 from __future__ import annotations
@@ -228,6 +232,14 @@ NODE_DETAIL_MIN_H = Inches(0.16)
 NODE_PHOTO_PATH = ASSETS_DIR / "1u-qumulo-node.png"
 NODE_PHOTO_CROP = {"crop_left": 0.0034, "crop_right": 0.0, "crop_top": 0.4139, "crop_bottom": 0.4222}
 
+# 2U node chassis photo -- a specific real model's chassis, used generically
+# for any 2U-height node (not exact-match-per-model, same as the 1U photo
+# above). Source PNG is 745x169; alpha bbox (20, 19, 725, 150), cropped with
+# the same ~2px safety margin approach as the 1U asset; re-derive if the
+# asset is ever replaced.
+NODE_PHOTO_2U_PATH = ASSETS_DIR / "2u-qumulo-node.png"
+NODE_PHOTO_2U_CROP = {"crop_left": 0.0242, "crop_right": 0.0242, "crop_top": 0.1006, "crop_bottom": 0.1006}
+
 
 def _draw_server(slide, x, y, w, h, fill, is_new):
     shape = _rect(slide, x, y, w, h, fill=fill,
@@ -257,10 +269,10 @@ def _draw_server(slide, x, y, w, h, fill, is_new):
     return shape
 
 
-def _draw_server_photo(slide, x, y, w, h, is_new):
-    pic = slide.shapes.add_picture(str(NODE_PHOTO_PATH), x, y, w, h)
+def _draw_server_photo(slide, x, y, w, h, is_new, photo_path=NODE_PHOTO_PATH, photo_crop=NODE_PHOTO_CROP):
+    pic = slide.shapes.add_picture(str(photo_path), x, y, w, h)
     pic.shadow.inherit = False
-    for attr, value in NODE_PHOTO_CROP.items():
+    for attr, value in photo_crop.items():
         setattr(pic, attr, value)
     # python-pptx always adds noChangeAspect="1" (a resize-handle hint, not a
     # rendering rule per the OOXML spec) but real PowerPoint appears to also
@@ -499,6 +511,9 @@ def _draw_rack(slide, report: ClusterReport, rack_label: str, label_text=None, m
         h = ru_height * node["ru"]
         if node["ru"] == 1:
             _draw_server_photo(slide, RACK_X, y, RACK_W, h, node["is_new"])
+        elif node["ru"] == 2:
+            _draw_server_photo(slide, RACK_X, y, RACK_W, h, node["is_new"],
+                                photo_path=NODE_PHOTO_2U_PATH, photo_crop=NODE_PHOTO_2U_CROP)
         else:
             fill = NODE_NEW_FILL if node["is_new"] else NODE_FILL
             _draw_server(slide, RACK_X, y, RACK_W, h, fill, node["is_new"])

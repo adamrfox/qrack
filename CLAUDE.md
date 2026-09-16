@@ -274,7 +274,20 @@ handling for a bad input path or an out-of-range `--slide`.
 - **Rack units:** `ceil(node_height_in / 1.75)`, min 1. Qumulo nodes here are
   1.7 in = 1U, but the field is per-model so mixed-height clusters work. Sanity
   check: `sum(m.ru * m.count) == report.rack_u` (the report's "Rack Space
-  Required"). Treat a mismatch as a parse bug.
+  Required"). Treat a mismatch as a parse bug. This `.ru` value alone (no
+  separate lookup or config) is also what picks a node's chassis art in
+  `renderer._draw_rack`: `ru == 1` or `ru == 2` gets a bundled product
+  photo (`NODE_PHOTO_PATH`/`NODE_PHOTO_2U_PATH`, `qumulo_rack/assets/`),
+  anything else falls back to the drawn vector server icon
+  (`_draw_server`). Each bundled photo is a specific real model's chassis
+  used generically for *any* node of that height, not matched per model
+  code — by explicit product decision (not worried about being exact here,
+  a photo of the right size reads better than a vector icon of the wrong
+  one). Adding a new height's photo means: drop the asset in
+  `qumulo_rack/assets/`, compute its crop fractions from its alpha
+  bounding box the same way the existing ones were (see the comments
+  above `NODE_PHOTO_CROP`/`NODE_PHOTO_2U_CROP` in `renderer.py`), and add
+  one more branch next to the `ru == 2` one.
 - **Heterogeneous clusters are normal.** The "All Nodes" section lists one block
   per model, each with its own count/raw/height. Never assume a single model.
 - **Cabling:** each node has 2 front-end ports → dual-homed, one link to each of
