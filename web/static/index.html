@@ -417,11 +417,14 @@
       templateName.textContent = 'No template selected — using default styling';
       templateClearBtn.hidden = true;
     }
-    // Reflects the slide number actually in effect (raw mode) or blank
-    // (style-only mode already "spent" its slide choice at distill time,
-    // or no template at all) -- editing it only matters for the *next*
-    // file you choose, per the field's documented behavior.
-    templateSlideInput.value = (currentTemplateIsRaw && currentTemplateSlide) ? currentTemplateSlide : '';
+    // Shows the slide number actually in effect -- in style-only mode
+    // that's whatever got baked into the *current* distilled template
+    // (kept for display even though it's already "spent" and can't be
+    // changed without re-choosing a file), in raw mode it's what gets
+    // resent on every request. Blanking this after a successful distill
+    // would look exactly like "your slide number was ignored," which is
+    // the opposite of what actually happened -- keep it showing.
+    templateSlideInput.value = currentTemplateSlide || '';
   }
 
   function getRequestedTemplateSlide() {
@@ -473,23 +476,31 @@
         const buf = await file.arrayBuffer();
         let base64 = arrayBufferToBase64(buf);
         if (styleOnly) {
-          // The slide choice is spent here -- the distilled result has no
-          // slides left, so there's nothing to re-sample on later renders.
+          // The slide choice is spent picking colors here -- the distilled
+          // result has no slides left for a later request to re-sample
+          // from -- but it's still what's baked into *this* distilled
+          // file, so it stays in currentTemplateSlide for display; only
+          // buildPayload()'s decision to resend it depends on raw vs.
+          // style-only (see currentTemplateIsRaw).
           base64 = await deriveTemplateOnServer(base64, slideIndex);
-          currentTemplateIsRaw = false;
-          currentTemplateSlide = null;
         } else {
           // Raw mode keeps the deck's own slides, so the slide choice has
           // to be resent on every render/preview for the server to
           // re-sample from.
-          currentTemplateIsRaw = true;
-          currentTemplateSlide = slideIndex;
         }
+        currentTemplateIsRaw = !styleOnly;
+        currentTemplateSlide = slideIndex;
         currentTemplateBase64 = base64;
         currentTemplateName = file.name + (styleOnly ? ' (style only)' : '')
           + (slideIndex ? ` [slide ${slideIndex}]` : '');
         updateTemplateUi();
         saveStoredTemplate();
+        // Confirms the slide choice actually took, since the only other
+        // sign is the field still showing the number (easy to read as
+        // "did nothing" rather than "already applied").
+        setTemplateSlideStatus(slideIndex
+          ? (styleOnly ? `Distilled using slide ${slideIndex}.` : `Loaded, matching slide ${slideIndex}.`)
+          : '');
         scheduleAutoPreview();
       } catch (err) {
         showError('Could not use that template file: ' + err.message);

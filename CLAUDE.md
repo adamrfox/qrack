@@ -361,10 +361,26 @@ time only (changing it afterward needs re-choosing the file, since the raw
 upload isn't kept around once processed). What happens with the slide
 number depends on the checkbox:
 - **Style only checked**: same as the checkbox — read once at
-  file-selection time, sent to that one `/api/derive-template` call, then
-  `currentTemplateSlide` resets to `null`, since the distilled result has
-  no slides left for a later request to sample from anyway. Editing the
-  field afterward is inert until a new file is chosen.
+  file-selection time and sent to that one `/api/derive-template` call.
+  `currentTemplateSlide` stays set to whatever was used, though — it
+  reflects "what's baked into the *current* distilled template," which is
+  still true after distilling, not just before. (An earlier version reset
+  it to `null` here on the theory that it's "spent" and irrelevant to
+  later requests, which is correct for what gets *sent*, but
+  `updateTemplateUi()` also used that same variable to decide what the
+  field displays — so the field reset to blank right after a successful
+  distill that *did* use the slide number, indistinguishable from the
+  number having been silently ignored. Reported exactly that way: "it
+  sets the slide # back to auto and I don't see any effect." Fixed by
+  decoupling the two concerns — `currentTemplateSlide` always reflects
+  the truth for display, `currentTemplateIsRaw` alone decides whether
+  `buildPayload()` resends it.) Editing the field after a distill doesn't
+  change anything about the current template — still inert until a new
+  file is chosen — but the file-choice handler itself now also sets an
+  explicit `Distilled using slide N.` status, since a field that already
+  shows the right number isn't enough confirmation on its own that a
+  fresh distill actually used it (rather than, say, silently keeping
+  a stale value from before).
 - **Style only unchecked** (raw mode, original deck kept): the slide
   number has to be resent on *every* `/api/render`/`/api/preview` call
   alongside the raw `template_base64`, since sampling happens fresh each
