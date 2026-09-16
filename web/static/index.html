@@ -197,8 +197,9 @@
         With "style only" checked, the rack slide just picks up the template's theme colors. Unchecked,
         it's appended after the template's own slides instead. Some decks look different from slide to
         slide &mdash; leave "Match slide #" blank to match the deck's overall look, or give a specific
-        slide number to match just that one. Remembered in this browser (both settings apply when you
-        pick a file &mdash; changing them afterward needs re-choosing the file).
+        slide number to match just that one. Remembered in this browser ("style only" applies when you
+        pick a file, and changing it afterward needs re-choosing the file; with it unchecked, the slide
+        number updates the preview live).
       </div>
     </div>
 
@@ -498,6 +499,22 @@
     currentTemplateIsRaw = false;
     currentTemplateSlide = null;
     updateTemplateUi();
+    saveStoredTemplate();
+    scheduleAutoPreview();
+  });
+
+  // In raw mode the full deck (with all its slides) is still sitting in
+  // currentTemplateBase64, so a new slide number can be re-sampled live,
+  // no re-upload needed -- unlike style-only mode, where the slide choice
+  // is spent the moment /api/derive-template strips the deck down to
+  // nothing, and changing this field only takes effect on the *next* file
+  // chosen (see the hint text below the picker).
+  templateSlideInput.addEventListener('input', () => {
+    if (!currentTemplateIsRaw || !currentTemplateBase64) return;
+    currentTemplateSlide = getRequestedTemplateSlide();
+    currentTemplateName = currentTemplateName.replace(/ \[slide \d+\]$/, '')
+      + (currentTemplateSlide ? ` [slide ${currentTemplateSlide}]` : '');
+    templateName.textContent = currentTemplateName;
     saveStoredTemplate();
     scheduleAutoPreview();
   });

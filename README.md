@@ -195,8 +195,10 @@ branded deck, and any slide number applies to that one-time distillation.
 Uncheck it to use the template as-is and have the rack slide inserted
 after its existing slides instead — a slide number here gets resent on
 every render/preview, since the full deck (and its other slides to sample
-from) is still around. Either way, the resulting template is remembered in
-the browser (`localStorage`) so you don't need to re-upload it for every
+from) is still around, so changing it once a preview is showing updates
+that preview live, no re-upload needed. Either way, the resulting template
+is remembered in the browser (`localStorage`) so you don't need to
+re-upload it for every
 report.
 
 ### Updating / stopping

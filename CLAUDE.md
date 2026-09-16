@@ -356,19 +356,23 @@ checkbox (checked by default) that, when a file is chosen, first round-trips
 it through `/api/derive-template` before storing/using it — so by default
 the browser only ever persists the small distilled file, not the original
 branded deck — plus an optional "Match slide #" number field for a deck
-with more than one distinct look. Both the checkbox and the slide number
-are read at file-selection time only (changing either afterward needs
-re-choosing the file, since the raw upload isn't kept around once
-processed). What happens with the slide number depends on the checkbox:
-- **Style only checked**: the slide number goes to that one
-  `/api/derive-template` call and is then done with — `currentTemplateSlide`
-  resets to `null` afterward, since the distilled result has no slides
-  left for a later request to sample from anyway.
+with more than one distinct look. The checkbox is read at file-selection
+time only (changing it afterward needs re-choosing the file, since the raw
+upload isn't kept around once processed). What happens with the slide
+number depends on the checkbox:
+- **Style only checked**: same as the checkbox — read once at
+  file-selection time, sent to that one `/api/derive-template` call, then
+  `currentTemplateSlide` resets to `null`, since the distilled result has
+  no slides left for a later request to sample from anyway. Editing the
+  field afterward is inert until a new file is chosen.
 - **Style only unchecked** (raw mode, original deck kept): the slide
   number has to be resent on *every* `/api/render`/`/api/preview` call
   alongside the raw `template_base64`, since sampling happens fresh each
   time against the full deck (`currentTemplateIsRaw` tracks this so
-  `buildPayload()` knows whether to include it).
+  `buildPayload()` knows whether to include it) — and because that full
+  deck is still sitting in the browser, an `input` listener on the field
+  updates `currentTemplateSlide` and fires the debounced auto-preview live,
+  no re-upload needed, once a preview is already showing.
 
 `ClusterReport.from_dict()` / `NodeModel.from_dict()` (parser.py) rebuild the
 dataclasses from that edited JSON; `parse_report(source, *, name=None)`
