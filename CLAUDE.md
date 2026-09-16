@@ -467,14 +467,17 @@ JS:
   user-editable there).
 - `POST /api/render` and `POST /api/preview` take the same body — `{report`
   (possibly edited by the user), `rack_label`, `visible_stats`,
-  `template_base64`, `template_slide`, `rack_sizes}` (the last three are
-  optional — a `.pptx`, base64-encoded, to append the rack slide to;
-  `template_slide` a 1-based slide number to sample from instead of the
-  whole deck, only meaningful when `template_base64` still has its
+  `template_base64`, `template_slide`, `rack_sizes`, `preview_slide}` (the
+  last four are optional — a `.pptx`, base64-encoded, to append the rack
+  slide to; `template_slide` a 1-based slide number to sample from instead
+  of the whole deck, only meaningful when `template_base64` still has its
   original slides, since sampling has nothing to work with once they're
   stripped; `rack_sizes` an explicit node count per rack, see
-  `render_rack`'s `rack_sizes` — omit or `null` any of the three for the
-  default behavior) — and differ only in what they stream back:
+  `render_rack`'s `rack_sizes`; `preview_slide` a 1-based index into just
+  the slides *this render itself* added (not the whole deck, and not
+  meaningful to `/api/render`, which always returns everything) — omit or
+  `null` any of the four for the default behavior) — and differ only in
+  what they stream back:
   `/api/render` streams the `.pptx`
   with `Content-Disposition: attachment`; `/api/preview` renders that *same*
   `.pptx` to a PNG and streams that instead, so the preview can never drift
@@ -505,21 +508,56 @@ JS:
     -singlefile` to pull out page `N` specifically. 180 DPI on the fixed
     13.333"×7.5" slide is what yields exactly `PREVIEW_WIDTH_PX` ×
     `PREVIEW_HEIGHT_PX` (2400×1350).
-  - `N` is `template_slide_count + 1` — the *first* of our own slides, not
+  - `N` is `template_slide_count + preview_slide` — `preview_slide`
+    (1-based, default `1`) indexing into just our own added slides, not
     the deck's last — where `template_slide_count` is read from the
     template file itself (`len(Presentation(template_path).slides)`,
     before `render_rack` appends anything) and is `0` with no template.
-    This used to just be `len(Presentation(pptx_path).slides)` (the whole
-    deck's last slide), which was equivalent back when `render_rack` only
-    ever appended exactly one slide — but a multi-rack cluster can now add
-    several (see "Multi-rack layout" above), and its *last* one is the
-    dedicated stats slide. Targeting the last slide would silently preview
-    only the stats panel for exactly the reports where a visual sanity
-    check of the rack diagram matters most, so this deliberately targets
-    the first rack slide instead. Runs unconditionally (not just when a
-    template is given) for simplicity — it happens to be a no-op
-    difference for a single-slide, no-template render, since page 1
-    already is our slide.
+    This used to unconditionally target `len(Presentation(pptx_path).slides)`
+    (the whole deck's last slide), which was equivalent back when
+    `render_rack` only ever appended exactly one slide — but a multi-rack
+    cluster can now add several (see "Multi-rack layout" above), and its
+    *last* one is the dedicated stats slide. Always targeting the last
+    slide would have silently previewed only the stats panel for exactly
+    the reports where a visual sanity check of the rack diagram matters
+    most, and defaulting `preview_slide` to `1` keeps that fixed: the
+    first rack slide, not the last slide overall, is what a caller sees
+    with no `preview_slide` given. Reachable at all past slide 1 is a real
+    need, not just tidiness — reported firsthand against a genuine 3-rack
+    cluster ("I modified the rack count... and I'm only seeing 2 racks on
+    the preview"): the render itself was correct (all 3 racks were in the
+    downloaded `.pptx`), but before `preview_slide` existed, `/api/preview`
+    had no way to show anything past the first rack slide at all, so the
+    third rack and the aggregated stats were both invisible until download.
+    `total_our_slides` (`len(Presentation(pptx_path).slides) -
+    template_slide_count`, computed once the render is done since it
+    depends on how many racks/slides *this particular* report and
+    rack-split actually needed) is what bounds `preview_slide` — an
+    out-of-range value is a clean `422` naming the valid range, not a
+    silent clamp, so a stale page number left over from a bigger split
+    doesn't quietly show the wrong slide. Both values also come back as
+    `X-Slide-Index`/`X-Slide-Count` response headers (added to
+    `expose_headers` on the CORS middleware, since this API allows
+    cross-origin callers) so the caller can build pager UI without
+    duplicating the slide-count math — see the web UI's
+    `#preview-pager` below. Runs unconditionally (not just when a template
+    is given) for simplicity — it happens to be a no-op difference for a
+    single-slide, no-template render, since page 1 already is our slide.
+  - The web UI's `#preview-pager` (Prev / "Slide N of M" / Next, next to
+    the preview image) reads exactly those two headers on every preview
+    response and hides itself whenever `X-Slide-Count` is `1` — the
+    overwhelmingly common case, so nothing changes there. `currentPreviewSlide`
+    (the page currently shown, sent as `preview_slide`) resets to `1`
+    whenever the next render could plausibly produce a different slide
+    count than the last one shown — a fresh report, an edited rack-split
+    field, or "Reset to auto-split" — so a stale page index from a larger
+    previous split can't end up requesting a page that no longer exists.
+    It deliberately does *not* reset on every `scheduleAutoPreview()` call
+    generally (e.g. a rack-label edit or a stat-visibility toggle, neither
+    of which can change the slide count) — those keep whatever page the
+    user was already looking at, since re-centering them back to slide 1
+    on every keystroke would make paging forward and then tweaking the
+    label pointlessly throw away where they were.
 
 The UI shows the parsed config, lets the user fix the highlighted-as-new
 selection (and optionally the rack label, stat selection, rack split, and a

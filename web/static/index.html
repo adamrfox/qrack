@@ -122,6 +122,12 @@
   @keyframes spin { to { transform: rotate(360deg); } }
   #preview-img { width: 100%; border: 1px solid var(--border); border-radius: 6px; display: block; }
   .preview-status { font-weight: normal; font-size: 0.8rem; color: var(--muted); }
+  .preview-pager {
+    display: flex; align-items: center; justify-content: center; gap: 0.9rem;
+    margin-top: 0.6rem; font-size: 0.88rem; color: var(--muted);
+  }
+  .preview-pager button { padding: 0.3rem 0.7rem; }
+  .preview-pager button:disabled { background: transparent; color: var(--border); border-color: var(--border); cursor: default; }
   .hint { font-size: 0.85rem; color: var(--muted); }
   .template-row { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
   [hidden] { display: none !important; }
@@ -224,6 +230,11 @@
   <div class="card" id="preview-card" hidden>
     <h2>Preview <span id="preview-status" class="preview-status" hidden></span></h2>
     <img id="preview-img" alt="Slide preview">
+    <div class="preview-pager" id="preview-pager" hidden>
+      <button type="button" class="secondary" id="preview-prev-btn">&lsaquo; Prev</button>
+      <span id="preview-pager-label"></span>
+      <button type="button" class="secondary" id="preview-next-btn">Next &rsaquo;</button>
+    </div>
   </div>
 </main>
 
@@ -257,11 +268,22 @@
   const previewCard = document.getElementById('preview-card');
   const previewImg = document.getElementById('preview-img');
   const previewStatus = document.getElementById('preview-status');
+  const previewPager = document.getElementById('preview-pager');
+  const previewPagerLabel = document.getElementById('preview-pager-label');
+  const previewPrevBtn = document.getElementById('preview-prev-btn');
+  const previewNextBtn = document.getElementById('preview-next-btn');
   const renderBtn = document.getElementById('render-btn');
   const resetBtn = document.getElementById('reset-btn');
   let previewUrl = null;
   let autoPreviewTimer = null;
   let previewRequestSeq = 0;
+  // 1-based index into *our own* added slides (see api_preview's
+  // preview_slide) -- which one buildPayload() asks for and the pager
+  // buttons below step through. Reset to 1 whenever the underlying
+  // render could produce a different slide count (a fresh report, or an
+  // edited rack split), so a stale page index from a bigger previous
+  // split can't end up out of range.
+  let currentPreviewSlide = 1;
 
   let currentReport = null;
   let currentAvailableStats = [];
@@ -360,6 +382,9 @@
     setupRackSplit(report);
 
     rackLabelInput.value = '';
+    // A prior report's slide count (if any preview was showing) has no
+    // bearing on this new one -- always start back at the first slide.
+    currentPreviewSlide = 1;
     uploadCard.hidden = false;
     confirmCard.hidden = false;
   }
@@ -437,12 +462,18 @@
   }
 
   rackSplitInputsEl.addEventListener('input', () => {
+    // Editing counts can change how many slides the render produces --
+    // whichever page was showing may no longer exist, so fall back to
+    // the first rather than risk asking the server for an out-of-range
+    // preview_slide.
+    currentPreviewSlide = 1;
     if (validateRackSplit()) scheduleAutoPreview();
   });
   rackSplitResetBtn.addEventListener('click', () => {
     if (!autoRackSizes) return;
     renderRackSplitInputs(autoRackSizes);
     validateRackSplit();
+    currentPreviewSlide = 1;
     scheduleAutoPreview();
   });
 
@@ -731,6 +762,7 @@
     previewCard.hidden = true;
     rackSplitSection.hidden = true;
     autoRackSizes = null;
+    currentPreviewSlide = 1;
     clearTimeout(autoPreviewTimer);
     clearError();
   });
@@ -762,6 +794,7 @@
       // no slides left for the server to re-sample from.
       template_slide: currentTemplateIsRaw ? currentTemplateSlide : null,
       rack_sizes: rackSizes,
+      preview_slide: currentPreviewSlide,
     };
   }
 
@@ -793,13 +826,33 @@
       const body = await resp.json().catch(() => ({}));
       throw new Error(body.detail || ('HTTP ' + resp.status));
     }
+    // Reflects which of our own slides this PNG actually is and how many
+    // there are in total (see api_preview's preview_slide) -- drives the
+    // pager below rather than trusting whatever page we last asked for,
+    // since the server is the source of truth for how many slides a given
+    // report/rack-split combination actually produces.
+    const slideIndex = Number(resp.headers.get('X-Slide-Index')) || 1;
+    const slideCount = Number(resp.headers.get('X-Slide-Count')) || 1;
     const blob = await resp.blob();
     if (seq !== previewRequestSeq) return; // superseded while awaiting the body
     if (previewUrl) URL.revokeObjectURL(previewUrl);
     previewUrl = URL.createObjectURL(blob);
     previewImg.src = previewUrl;
     previewCard.hidden = false;
+    currentPreviewSlide = slideIndex;
+    previewPager.hidden = slideCount <= 1;
+    previewPagerLabel.textContent = `Slide ${slideIndex} of ${slideCount}`;
+    previewPrevBtn.disabled = slideIndex <= 1;
+    previewNextBtn.disabled = slideIndex >= slideCount;
   }
+
+  function goToPreviewSlide(n) {
+    currentPreviewSlide = n;
+    withButtonBusy(previewBtn, 'Loading&hellip;', () => fetchAndShowPreview())
+      .catch(err => showError('Could not load that slide: ' + err.message));
+  }
+  previewPrevBtn.addEventListener('click', () => goToPreviewSlide(currentPreviewSlide - 1));
+  previewNextBtn.addEventListener('click', () => goToPreviewSlide(currentPreviewSlide + 1));
 
   previewBtn.addEventListener('click', () => {
     if (!currentReport) return;

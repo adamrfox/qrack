@@ -46,6 +46,7 @@ app.add_middleware(
     allow_origins=["*"],
     allow_methods=["POST", "GET"],
     allow_headers=["*"],
+    expose_headers=["X-Slide-Index", "X-Slide-Count"],
 )
 
 
@@ -63,6 +64,9 @@ class RenderRequest(BaseModel):
     )
     rack_sizes: list[int] | None = Field(
         None, description="Explicit node count per rack (must sum to the report's total node count). Omit to auto-split by RU whenever the cluster needs more than one rack; up to 2 racks share one slide, more spill onto additional slides with the aggregated stats on a dedicated final slide."
+    )
+    preview_slide: int | None = Field(
+        None, description="/api/preview only: 1-based index into *our own* added slides (not the whole deck) to render as the PNG -- e.g. 2 for the second rack group, or the last one for the aggregated stats slide. Omit or 1 for the first. Ignored by /api/render, which always returns the whole deck."
     )
 
 
@@ -251,17 +255,23 @@ def api_preview(req: RenderRequest):
             raise
 
         # Our slide(s) are always appended after any template slides, so
-        # the first one we added is at this fixed position regardless of
-        # how many we ended up adding (1, for the common case; more for a
-        # cluster split across multiple slides -- see render_rack's
-        # rack_groups). Deliberately the *first* of ours, not the last: a
-        # multi-slide render's last slide is the aggregated stats slide,
-        # but the rack diagrams -- the part actually worth a visual sanity
-        # check -- are the earlier ones. soffice's PNG export only ever
-        # renders slide 1 of a multi-slide deck with no way to target
-        # another one, so we convert to PDF (which renders every page) and
-        # then extract the one page we want with pdftoppm.
-        target_page = template_slide_count + 1
+        # they occupy a fixed, known range regardless of how many we ended
+        # up adding (1, for the common case; more for a cluster split
+        # across multiple slides -- see render_rack's rack_groups). A
+        # multi-slide render's *last* slide is the aggregated stats slide,
+        # not a rack diagram, so `preview_slide` (1-based, into just our
+        # own slides) lets the caller page through all of them instead of
+        # only ever seeing the first -- defaulting to 1 (the first rack
+        # group) since that's the one most worth a visual sanity check.
+        # soffice's PNG export only ever renders slide 1 of a multi-slide
+        # deck with no way to target another one, so we convert to PDF
+        # (which renders every page) and then extract the one page we
+        # want with pdftoppm.
+        total_our_slides = len(Presentation(pptx_path).slides) - template_slide_count
+        preview_slide = req.preview_slide or 1
+        if not 1 <= preview_slide <= total_our_slides:
+            raise HTTPException(422, f"preview_slide must be between 1 and {total_our_slides} for this render, got {preview_slide}")
+        target_page = template_slide_count + preview_slide
 
         # A dedicated profile dir per request avoids soffice's user-profile
         # lock contention under concurrent preview requests.
@@ -303,4 +313,7 @@ def api_preview(req: RenderRequest):
 
         png_bytes = Path(png_path).read_bytes()
 
-    return Response(content=png_bytes, media_type="image/png")
+    return Response(
+        content=png_bytes, media_type="image/png",
+        headers={"X-Slide-Index": str(preview_slide), "X-Slide-Count": str(total_our_slides)},
+    )
