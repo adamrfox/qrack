@@ -429,6 +429,16 @@ def _rack_labels(base_label: str | None, num_racks: int) -> list[str]:
     return [f"{prefix} — Rack {i + 1}" for i in range(num_racks)]
 
 
+def auto_rack_split(report: ClusterReport) -> list[int]:
+    """The node count per rack `render_rack` would use by default (no
+    `rack_sizes` override) -- for a caller (e.g. the web confirm step) to
+    show the suggested split and let the user edit it before rendering,
+    without duplicating `_split_into_racks`'s auto-fill logic. Always
+    `[report's total node count]` (one rack) for a cluster that fits in
+    one, same as `render_rack` itself."""
+    return [len(rack) for rack in _split_into_racks(_node_sequence(report.models))]
+
+
 # --- formatting helpers ---------------------------------------------------
 
 

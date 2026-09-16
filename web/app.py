@@ -1,11 +1,13 @@
 """FastAPI front-end for qrack.
 
-/api/parse (confirm/edit the new-node guess), /api/render and /api/preview
-(render, possibly against a template), and /api/derive-template (strip a
-template down to just its theme) -- see CLAUDE.md. Uploads are untrusted:
-capped size, magic-byte checked, parsed/rendered against a time box, and
-every render happens in its own temp file that gets deleted after
-streaming -- never a shared/static path.
+/api/parse (confirm/edit the new-node guess), /api/rack-split (suggest an
+auto-split for the confirm step's editable rack-count fields),
+/api/render and /api/preview (render, possibly against a template and/or
+a manual rack split), and /api/derive-template (strip a template down to
+just its theme) -- see CLAUDE.md. Uploads are untrusted: capped size,
+magic-byte checked, parsed/rendered against a time box, and every render
+happens in its own temp file that gets deleted after streaming -- never a
+shared/static path.
 """
 
 from __future__ import annotations
@@ -27,7 +29,7 @@ from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
 from qumulo_rack.parser import ClusterReport, parse_report
-from qumulo_rack.renderer import available_stats, derive_template, render_rack
+from qumulo_rack.renderer import auto_rack_split, available_stats, derive_template, render_rack
 
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # 20 MB -- sizing reports are a few hundred KB
 MAX_TEMPLATE_BYTES = 80 * 1024 * 1024  # 80 MB -- a real internal Qumulo template ran ~40MB with embedded video/images
@@ -69,6 +71,10 @@ class DeriveTemplateRequest(BaseModel):
     template_slide: int | None = Field(
         None, description="1-based slide number to sample colors from instead of the whole deck."
     )
+
+
+class RackSplitRequest(BaseModel):
+    report: dict = Field(..., description="ClusterReport.as_dict() output, possibly edited by the user")
 
 
 def _reject_if_not_a_sizing_report(report: ClusterReport) -> None:
@@ -148,6 +154,17 @@ async def api_parse(file: UploadFile = File(...)):
 
     _reject_if_not_a_sizing_report(report)
     return {"report": report.as_dict(), "available_stats": available_stats(report)}
+
+
+@app.post("/api/rack-split")
+def api_rack_split(req: RackSplitRequest):
+    """The node count per rack `render_rack` would use by default (no
+    `rack_sizes` override) -- for the confirm step to show a suggested
+    split and let the user edit it before rendering, without duplicating
+    the auto-split logic in JS. Always `{"rack_sizes": [total node count]}`
+    (one rack) for a cluster that fits in one."""
+    report = _build_report(req)
+    return {"rack_sizes": auto_rack_split(report)}
 
 
 @app.post("/api/derive-template")

@@ -412,14 +412,24 @@ Upload a sizing PDF → confirm the new-vs-existing split → download the
 unchanged; `web/static/index.html` is a single-file, no-build-step vanilla
 HTML/JS page (no SPA framework).
 
-Four endpoints, because the new-node ambiguity makes a confirm step worth
-having, previewing shouldn't require a download first, and template
-distillation shouldn't require a round-trip through the CLI:
+Five endpoints, because the new-node ambiguity makes a confirm step worth
+having, previewing shouldn't require a download first, template
+distillation shouldn't require a round-trip through the CLI, and the
+rack-split editor shouldn't have to duplicate the auto-split algorithm in
+JS:
 
 - `POST /api/parse` (multipart PDF) → `200` with `{report: report.as_dict(),
   available_stats: [...]}` (see `renderer.available_stats` — every stat this
   report could show, for a selection checklist), or `422` with a clear
   message when it isn't a parseable Qumulo report.
+- `POST /api/rack-split` takes `{report}` and returns
+  `{rack_sizes: [n, ...]}` — `renderer.auto_rack_split`'s suggested
+  node-count-per-rack split (always `[total node count]`, one rack, for a
+  cluster that fits in one), for the confirm step's editable rack-split
+  fields to start from. Called once right after `/api/parse` resolves,
+  since the total node count it depends on never changes from anything
+  else editable in the confirm step (only `new_count`, not `count`, is
+  user-editable there).
 - `POST /api/render` and `POST /api/preview` take the same body — `{report`
   (possibly edited by the user), `rack_label`, `visible_stats`,
   `template_base64`, `template_slide`, `rack_sizes}` (the last three are
@@ -466,8 +476,29 @@ distillation shouldn't require a round-trip through the CLI:
     difference when there's no template, since page 1 already is our slide.
 
 The UI shows the parsed config, lets the user fix the highlighted-as-new
-selection (and optionally the rack label, stat selection, and a template),
-then calls preview and/or render. The template picker has a "style only"
+selection (and optionally the rack label, stat selection, rack split, and a
+template), then calls preview and/or render.
+
+**Rack split**: right after `renderConfirm` sets `currentReport`, it fires
+`/api/rack-split` (not awaited — a self-contained async call that fills in
+its own UI once it resolves, nothing else in `renderConfirm` depends on
+it) and hides the `#rack-split-section` block by default. If the response
+has more than one rack, that section un-hides with one number input per
+rack (`data-rack-idx="0"`, `"1"`, ...), pre-filled with the suggested
+split, plus a "Reset to auto-split" button that restores those same
+values. A cluster that fits in one rack never shows this section at all —
+`buildPayload()` sends `rack_sizes: null` whenever it's hidden, so nothing
+about the request changes for the common case. `validateRackSplit()`
+(non-negative integers, summing to the report's total node count) runs
+client-side on every edit and before every Preview/Generate click —
+gating `scheduleAutoPreview()` itself (not each call site separately)
+means every path that could trigger a render (rack label edits, stat
+toggles, the rack-split fields themselves) automatically respects it —
+so a typo is caught immediately with an inline message instead of costing
+a round-trip to the server's own `rack_sizes` validation in
+`_split_into_racks`.
+
+The template picker has a "style only"
 checkbox (checked by default) that, when a file is chosen, first round-trips
 it through `/api/derive-template` before storing/using it — so by default
 the browser only ever persists the small distilled file, not the original
@@ -602,11 +633,6 @@ Implementation notes (current state):
   panel moved to its own slide, is the natural next step, matching the
   design agreed on before this was built (2 racks share one slide; 3+
   splits across slides with stats separated out).
-- A web UI control for `rack_sizes` (a per-rack node count editor,
-  pre-filled with the auto-split result) -- `render_rack`, the CLI
-  (`--rack-sizes`), and `/api/render`/`/api/preview`'s `rack_sizes` field
-  all support the override already; only the web front-end doesn't expose
-  it yet.
 - Back-end switch pair when `backend_ports > 0`.
 - Auth, if the web app ever needs to leave a trusted network (currently none
   by design — see the "Docker shape" decision in project history).

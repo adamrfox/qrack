@@ -176,6 +176,16 @@
       <input type="text" id="rack-label" placeholder="e.g. Row 3 / Rack 12">
     </div>
 
+    <div id="rack-split-section" style="margin-top:1rem" hidden>
+      <label class="field">Rack split</label>
+      <div id="rack-split-hint" class="hint" style="margin-bottom:0.5rem"></div>
+      <div id="rack-split-inputs" style="display:flex; flex-wrap:wrap; gap:0.8rem; align-items:center;"></div>
+      <div class="stats-picker-actions" style="margin-top:0.5rem">
+        <button type="button" id="rack-split-reset-btn">Reset to auto-split</button>
+      </div>
+      <div id="rack-split-error" class="hint" style="color:var(--danger); margin-top:0.4rem" hidden></div>
+    </div>
+
     <div style="margin-top:1rem">
       <label class="field">PowerPoint template (optional)</label>
       <label style="display:flex; align-items:center; gap:0.4rem; font-size:0.88rem; font-weight:normal; margin-bottom:0.5rem; cursor:pointer;">
@@ -231,6 +241,11 @@
   const statsAllBtn = document.getElementById('stats-all-btn');
   const statsNoneBtn = document.getElementById('stats-none-btn');
   const rackLabelInput = document.getElementById('rack-label');
+  const rackSplitSection = document.getElementById('rack-split-section');
+  const rackSplitHint = document.getElementById('rack-split-hint');
+  const rackSplitInputsEl = document.getElementById('rack-split-inputs');
+  const rackSplitResetBtn = document.getElementById('rack-split-reset-btn');
+  const rackSplitErrorEl = document.getElementById('rack-split-error');
   const templateBtn = document.getElementById('template-btn');
   const templateInput = document.getElementById('template-input');
   const templateName = document.getElementById('template-name');
@@ -259,6 +274,10 @@
   // would just make sampling fail against an empty deck).
   let currentTemplateIsRaw = false;
   let currentTemplateSlide = null;
+  // The server-computed suggested split, kept around only so "Reset to
+  // auto-split" doesn't need a round-trip -- the actual counts used for
+  // rendering always come fresh from the input fields (see buildPayload).
+  let autoRackSizes = null;
 
   function showError(msg) {
     errorBox.textContent = msg;
@@ -338,11 +357,94 @@
     });
 
     renderStatsPicker();
+    setupRackSplit(report);
 
     rackLabelInput.value = '';
     uploadCard.hidden = false;
     confirmCard.hidden = false;
   }
+
+  // A cluster that needs more than one rack gets an editable node-count-
+  // per-rack breakdown here, pre-filled with the server's auto-split
+  // suggestion (computed the same way render_rack itself would split it,
+  // so this can never suggest something the backend wouldn't). Hidden
+  // entirely for the overwhelmingly common case -- a report that fits in
+  // one rack -- since there's nothing to choose there.
+  async function fetchRackSplit(report) {
+    try {
+      const resp = await fetch('/api/rack-split', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ report }),
+      });
+      if (!resp.ok) return null;
+      const body = await resp.json();
+      return body.rack_sizes;
+    } catch {
+      return null; // treat a network hiccup here as "nothing to show", not a hard error
+    }
+  }
+
+  function renderRackSplitInputs(sizes) {
+    rackSplitInputsEl.innerHTML = '';
+    sizes.forEach((n, i) => {
+      const label = document.createElement('label');
+      label.style.cssText = 'display:flex; align-items:center; gap:0.35rem; font-weight:normal; font-size:0.88rem;';
+      label.innerHTML = `Rack ${i + 1}:
+        <input type="number" min="0" data-rack-idx="${i}" value="${n}"
+               style="width:4.5rem; padding:0.3rem 0.4rem; border:1px solid var(--border); border-radius:4px; font:inherit;">`;
+      rackSplitInputsEl.appendChild(label);
+    });
+  }
+
+  function totalReportNodeCount() {
+    return currentReport ? currentReport.models.reduce((sum, m) => sum + m.count, 0) : 0;
+  }
+
+  // Validated client-side (not just left to the server's 422) so a typo
+  // is caught the instant it's made, not after a render/preview round-trip.
+  function validateRackSplit() {
+    if (rackSplitSection.hidden) return true;
+    const sizes = Array.from(rackSplitInputsEl.querySelectorAll('input[data-rack-idx]'))
+      .map(inp => parseInt(inp.value, 10));
+    if (sizes.some(n => !Number.isInteger(n) || n < 0)) {
+      rackSplitErrorEl.textContent = 'Rack sizes must be whole numbers, 0 or more.';
+      rackSplitErrorEl.hidden = false;
+      return false;
+    }
+    const total = totalReportNodeCount();
+    const sum = sizes.reduce((a, b) => a + b, 0);
+    if (sum !== total) {
+      rackSplitErrorEl.textContent = `Rack sizes add up to ${sum}, but this cluster has ${total} node(s).`;
+      rackSplitErrorEl.hidden = false;
+      return false;
+    }
+    rackSplitErrorEl.hidden = true;
+    return true;
+  }
+
+  async function setupRackSplit(report) {
+    rackSplitSection.hidden = true;
+    rackSplitErrorEl.hidden = true;
+    autoRackSizes = null;
+    const sizes = await fetchRackSplit(report);
+    if (!sizes || sizes.length <= 1) return;
+    autoRackSizes = sizes;
+    rackSplitHint.textContent =
+      `This cluster needs ${sizes.length} racks. Auto-split shown below -- edit the counts for a different split.`;
+    renderRackSplitInputs(sizes);
+    rackSplitSection.hidden = false;
+  }
+
+  rackSplitInputsEl.addEventListener('input', () => {
+    if (validateRackSplit()) scheduleAutoPreview();
+  });
+  rackSplitResetBtn.addEventListener('click', () => {
+    if (!autoRackSizes) return;
+    renderRackSplitInputs(autoRackSizes);
+    validateRackSplit();
+    scheduleAutoPreview();
+  });
 
   // Remembers which stats the user unchecked, per browser -- no login, no
   // server-side state. Stored as "hidden" rather than "visible" keys so a
@@ -627,6 +729,8 @@
     currentAvailableStats = [];
     confirmCard.hidden = true;
     previewCard.hidden = true;
+    rackSplitSection.hidden = true;
+    autoRackSizes = null;
     clearTimeout(autoPreviewTimer);
     clearError();
   });
@@ -643,6 +747,12 @@
     const visibleStats = Array.from(statsPicker.querySelectorAll('input[type="checkbox"]:checked'))
       .map(cb => cb.dataset.statKey);
 
+    let rackSizes = null;
+    if (!rackSplitSection.hidden) {
+      rackSizes = Array.from(rackSplitInputsEl.querySelectorAll('input[data-rack-idx]'))
+        .map(inp => Math.max(0, parseInt(inp.value, 10) || 0));
+    }
+
     return {
       report: currentReport,
       rack_label: rackLabelInput.value || null,
@@ -651,6 +761,7 @@
       // Only meaningful in raw mode -- a style-only distilled template has
       // no slides left for the server to re-sample from.
       template_slide: currentTemplateIsRaw ? currentTemplateSlide : null,
+      rack_sizes: rackSizes,
     };
   }
 
@@ -693,6 +804,10 @@
   previewBtn.addEventListener('click', () => {
     if (!currentReport) return;
     clearError();
+    if (!validateRackSplit()) {
+      rackSplitSection.scrollIntoView?.({ behavior: 'smooth', block: 'center' });
+      return;
+    }
     clearTimeout(autoPreviewTimer);
     withButtonBusy(previewBtn, 'Rendering&hellip;', async () => {
       await fetchAndShowPreview();
@@ -710,7 +825,7 @@
   // template-slide field, easy to miss since it's not next to the
   // preview itself).
   function scheduleAutoPreview(onSettled) {
-    if (previewCard.hidden || !currentReport) {
+    if (previewCard.hidden || !currentReport || !validateRackSplit()) {
       if (onSettled) onSettled(false, new Error('no preview shown yet'));
       return;
     }
@@ -732,6 +847,10 @@
   renderBtn.addEventListener('click', () => {
     if (!currentReport) return;
     clearError();
+    if (!validateRackSplit()) {
+      rackSplitSection.scrollIntoView?.({ behavior: 'smooth', block: 'center' });
+      return;
+    }
     withButtonBusy(renderBtn, 'Generating&hellip;', async () => {
       const resp = await fetch('/api/render', {
         method: 'POST',
