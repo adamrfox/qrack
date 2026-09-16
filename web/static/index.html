@@ -377,12 +377,25 @@
   // localStorage's per-origin quota (~5-10MB), in which case it simply
   // won't persist -- it still works for the current session.
   const TEMPLATE_STORAGE_KEY = 'qrack.template';
+  // Bump this whenever a code change alters what the saved fields mean
+  // (not just when new fields are added) -- e.g. the currentTemplateSlide
+  // reset-to-null-after-distill bug fix changed what a stored `slide`
+  // value actually implied about the accompanying `data`. Without this, a
+  // browser that saved a template under the old logic would silently load
+  // it back as if it matched the new logic: same bytes, same-looking
+  // fields, quietly wrong meaning -- exactly what happened here, and much
+  // harder to diagnose than "the field's just gone, re-pick your file."
+  const TEMPLATE_STORAGE_VERSION = 2;
 
   function loadStoredTemplate() {
     try {
       const raw = localStorage.getItem(TEMPLATE_STORAGE_KEY);
       if (!raw) return;
       const parsed = JSON.parse(raw);
+      if (parsed.version !== TEMPLATE_STORAGE_VERSION) {
+        localStorage.removeItem(TEMPLATE_STORAGE_KEY);
+        return;
+      }
       if (parsed && parsed.data && parsed.name) {
         currentTemplateBase64 = parsed.data;
         currentTemplateName = parsed.name;
@@ -398,6 +411,7 @@
     try {
       if (currentTemplateBase64) {
         localStorage.setItem(TEMPLATE_STORAGE_KEY, JSON.stringify({
+          version: TEMPLATE_STORAGE_VERSION,
           name: currentTemplateName, data: currentTemplateBase64,
           isRaw: currentTemplateIsRaw, slide: currentTemplateSlide,
         }));

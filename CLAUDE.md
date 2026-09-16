@@ -430,6 +430,24 @@ number depends on the checkbox:
   already do — caught by the jsdom regression suite (`test3.js`) the one
   time this slipped through here.
 
+**`localStorage` schema versioning** (`TEMPLATE_STORAGE_VERSION`,
+alongside `TEMPLATE_STORAGE_KEY`): the bug above had a second-order
+consequence worth guarding against on its own. A browser that had saved a
+template under the *old* buggy logic (correct bytes, but a `slide` field
+wrongly reset to `null`) would silently reload that old, now-incorrect
+combination as if it matched today's logic — because nothing about the
+stored shape changed, only what a given value was supposed to *mean*. That's
+strictly worse than losing the saved template: it looks like it's working
+(a template is loaded, a name is shown) while actually producing the wrong
+colors, which is exactly what got reported as "I don't see any effect."
+`saveStoredTemplate()` now stamps every write with `TEMPLATE_STORAGE_VERSION`;
+`loadStoredTemplate()` discards (and removes) anything that doesn't match,
+rather than trying to interpret it. **Bump this version** whenever a change
+alters what an existing stored field means (not just when a field is
+added) — the cost of bumping unnecessarily is one harmless re-select; the
+cost of not bumping when it mattered is a silent, hard-to-diagnose mismatch
+between what's displayed and what's actually being sent.
+
 `ClusterReport.from_dict()` / `NodeModel.from_dict()` (parser.py) rebuild the
 dataclasses from that edited JSON; `parse_report(source, *, name=None)`
 accepts a path or a file-like object, and `name` (when given) always wins for
