@@ -192,15 +192,30 @@ Unparsed fields come back `None` rather than raising — callers must handle tha
   guarantee, and a deck that genuinely uses two accent colors about
   equally will pick whichever the `Counter` happens to see first on a tie.
   **Scope, explicitly**: this is 3 flat colors, nothing else — no logos or
-  other pictures, no footer/page-number text, no gradients (only a flat
-  color is read off a gradient-filled shape's first stop), no decorative
-  shapes, no fonts. "Match this slide" means "use its background/title/
-  accent colors," not "reproduce its design" — confirmed against a real
-  template slide literally named "Slide Option - Dark with Logo," where
-  the fixed version correctly picks up its navy background and white
-  title but obviously doesn't carry over its logo, its rounded-rectangle
-  graphic pattern, or its footer. Reproducing any of those would be new,
+  other pictures, no footer/page-number text, no decorative shapes, no
+  fonts. "Match this slide" means "use its background/title/accent
+  colors," not "reproduce its design" — confirmed against a real template
+  slide literally named "Slide Option - Dark with Logo," where the fixed
+  version correctly picks up its navy background and white title but
+  obviously doesn't carry over its logo, its rounded-rectangle graphic
+  pattern, or its footer. Reproducing any of those would be new,
   separately-scoped work, not a bug in what's built today.
+
+  Gradients, on the other hand, *are* in scope, at reduced fidelity: any
+  fill (background `<p:bg>`, a full-bleed shape, an accent shape)
+  resolves through `_resolve_fill_color`, which handles a `SOLID` fill
+  directly and reads a `GRADIENT` fill's first color stop (position 0) as
+  a flat stand-in — a genuine gradient can't be reproduced, but a color
+  read off one end is far closer than treating the shape as if it had no
+  fill at all. That "as if no fill" behavior was the actual bug on a real
+  slide (a section-header layout with a bright-blue-to-navy gradient
+  background): the sampler only ever checked for `MSO_FILL_TYPE.SOLID`,
+  so a gradient-filled full-bleed shape was silently skipped, falling
+  through all the way to an unrelated, never-actually-visible master
+  background. Reported as "I tried slide 18 ... I didn't see a
+  difference" (the fallback happened to look close to the deck-wide
+  default). Every caller that reads a fill's color goes through
+  `_resolve_fill_color` now, not a direct `SOLID` check.
   Takes an optional `slide_index` (1-based) to sample a single specific
   slide instead of majority-voting across the deck — useful for a deck
   that genuinely has more than one distinct look (confirmed on a real

@@ -765,11 +765,35 @@ def _blend(c1: RGBColor, c2: RGBColor, t: float) -> RGBColor:
     return RGBColor(*(round(c1[i] + (c2[i] - c1[i]) * t) for i in range(3)))
 
 
+def _resolve_fill_color(fill, theme_colors: dict, color_map: dict):
+    """Best-effort `RGBColor` for a python-pptx `FillFormat`, or `None` if
+    it's unset or a type we don't read (picture/pattern/textured fills --
+    rare for a background or accent shape, not worth chasing). Handles
+    `SOLID` directly and, for `GRADIENT`, reads the color of the *first*
+    stop (position 0) -- a gradient is drawn as a genuine color transition,
+    which this renderer has no way to reproduce, but a flat color read off
+    one end is far closer to the source deck than treating a gradient-
+    filled shape as if it had no fill at all (the earlier behavior, which
+    silently missed a real deck's gradient-filled background entirely and
+    fell through to an unrelated, invisible-in-practice master color)."""
+    try:
+        kind = fill.type
+    except Exception:
+        return None
+    if kind == MSO_FILL_TYPE.SOLID:
+        return _resolve_color_format(fill.fore_color, theme_colors, color_map)
+    if kind == MSO_FILL_TYPE.GRADIENT:
+        try:
+            stops = sorted(fill.gradient_stops, key=lambda s: s.position)
+            return _resolve_color_format(stops[0].color, theme_colors, color_map) if stops else None
+        except Exception:
+            return None
+    return None
+
+
 def _effective_background_color(background, theme_colors: dict, color_map: dict):
     try:
-        if background.fill.type != MSO_FILL_TYPE.SOLID:
-            return None
-        return _resolve_color_format(background.fill.fore_color, theme_colors, color_map)
+        return _resolve_fill_color(background.fill, theme_colors, color_map)
     except Exception:
         return None
 
@@ -790,9 +814,7 @@ def _full_bleed_fill_color(shapes, slide_w, slide_h, theme_colors: dict, color_m
                     or abs(shape.width - slide_w) > tolerance
                     or abs(shape.height - slide_h) > tolerance):
                 continue
-            if shape.fill.type != MSO_FILL_TYPE.SOLID:
-                continue
-            color = _resolve_color_format(shape.fill.fore_color, theme_colors, color_map)
+            color = _resolve_fill_color(shape.fill, theme_colors, color_map)
         except Exception:
             continue
         if color:
@@ -929,10 +951,9 @@ def _sample_deck_colors(prs: Presentation, slide_index: int | None = None) -> di
                         if color and not _is_neutral_color(color):
                             accent_votes[color] += 1
             try:
-                if shape.fill.type == MSO_FILL_TYPE.SOLID:
-                    color = _resolve_color_format(shape.fill.fore_color, theme_colors, color_map)
-                    if color and not _is_neutral_color(color):
-                        accent_votes[color] += 1
+                color = _resolve_fill_color(shape.fill, theme_colors, color_map)
+                if color and not _is_neutral_color(color):
+                    accent_votes[color] += 1
             except Exception:
                 pass
 
