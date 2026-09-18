@@ -203,6 +203,15 @@ def index() -> HTMLResponse:
     return HTMLResponse((STATIC_DIR / "index.html").read_text(), headers={"Cache-Control": "no-cache"})
 
 
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon() -> FileResponse:
+    # The only other static asset this app has; not worth a full
+    # StaticFiles mount for one file. Unlike index.html, this is fine to
+    # let the browser cache normally -- it never changes without a
+    # deploy, and a deploy already invalidates any prior tab's cache.
+    return FileResponse(STATIC_DIR / "favicon.ico", media_type="image/x-icon")
+
+
 @app.post("/api/parse")
 async def api_parse(file: UploadFile = File(...)):
     if file.content_type not in ("application/pdf", "application/octet-stream"):
