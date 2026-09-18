@@ -740,8 +740,22 @@ JS:
     label pointlessly throw away where they were.
 
 The UI shows the parsed config, lets the user fix the highlighted-as-new
-selection (and optionally the rack label, stat selection, rack split, and a
-template), then calls preview and/or render.
+selection (and optionally the slide title, rack label, stat selection, rack
+split, and a template), then calls preview and/or render.
+
+**Slide title**: `#report-title` is a real `<input>`, not static text —
+pre-filled from `report.title` (the parser's own guess, e.g. "New Qumulo
+Cluster" vs. "Qumulo Cluster Expansion" depending on report type, or
+whatever else a future report format's title text turns out to be — this
+was deliberately kept generic rather than hardcoding either string) and
+editable like every other confirm-step field. `buildPayload()` writes
+`reportTitleInput.value.trim() || null` into `currentReport.title` before
+every request (same pattern as the model new-counts above it), so an
+edit reaches `render_rack` exactly the way `rack_label` already does; a
+cleared field sends `null` rather than an empty string, so `render_rack`'s
+own `"Qumulo Cluster"` fallback applies instead of an actually-blank
+title. Reported directly: "let's make that editable and have that
+propagate to the PPTX."
 
 **Rack split**: right after `renderConfirm` sets `currentReport`, it fires
 `/api/rack-split` (not awaited — a self-contained async call that fills in
