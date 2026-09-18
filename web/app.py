@@ -8,6 +8,11 @@ just its theme) -- see CLAUDE.md. Uploads are untrusted: capped size,
 magic-byte checked, parsed/rendered against a time box, and every render
 happens in its own temp file that gets deleted after streaming -- never a
 shared/static path.
+
+`/api/preview` (and, opportunistically, `/api/render`) reuse a
+process-local in-memory cache of the expensive render+convert step -- see
+`render_cache.py` for why RAM, why keyed the way it is, and why only
+`/api/preview` populates it.
 """
 
 from __future__ import annotations
@@ -30,6 +35,7 @@ from starlette.background import BackgroundTask
 
 from qumulo_rack.parser import ClusterReport, parse_report
 from qumulo_rack.renderer import auto_rack_split, available_stats, derive_template, render_rack
+from web.render_cache import CACHE, CacheEntry, make_key
 
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # 20 MB -- sizing reports are a few hundred KB
 MAX_TEMPLATE_BYTES = 80 * 1024 * 1024  # 80 MB -- a real internal Qumulo template ran ~40MB with embedded video/images
@@ -122,6 +128,72 @@ def _resolve_template(template_base64: str | None):
         yield tmp.name
 
 
+def _cache_key(req: "RenderRequest") -> str:
+    """Everything that determines the rendered output -- deliberately
+    excludes `preview_slide`, which only selects which already-rendered
+    page to extract, not what gets rendered."""
+    return make_key(
+        report=req.report, rack_label=req.rack_label, visible_stats=req.visible_stats,
+        template_base64=req.template_base64, template_slide=req.template_slide, rack_sizes=req.rack_sizes,
+    )
+
+
+def _render_and_convert(req: "RenderRequest") -> CacheEntry:
+    """The expensive path: parse, render to `.pptx`, convert to `.pdf` --
+    everything `/api/preview` needs to then extract any page cheaply, and
+    everything worth caching (see render_cache.py). Raises `HTTPException`
+    (or a `ValueError`/generic exception `/api/preview` itself used to
+    catch inline before the cache existed) exactly as the pre-cache
+    pipeline did; nothing about error handling changes, just where this
+    code lives."""
+    report = _build_report(req)
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        pptx_path = os.path.join(tmp_dir, "slide.pptx")
+        template_slide_count = 0
+        try:
+            with _resolve_template(req.template_base64) as template_path:
+                if template_path is not None:
+                    template_slide_count = len(Presentation(template_path).slides)
+                render_rack(report, pptx_path, rack_label=req.rack_label or None,
+                            visible_stats=req.visible_stats, template_path=template_path,
+                            template_slide=req.template_slide, rack_sizes=req.rack_sizes)
+        except HTTPException:
+            raise
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        except Exception as exc:
+            if req.template_base64:
+                raise HTTPException(422, f"Couldn't use that template: {exc}") from exc
+            raise
+
+        total_our_slides = len(Presentation(pptx_path).slides) - template_slide_count
+
+        # A dedicated profile dir per request avoids soffice's user-profile
+        # lock contention under concurrent preview requests.
+        profile_dir = os.path.join(tmp_dir, "lo_profile")
+        try:
+            result = subprocess.run(
+                ["soffice", "--headless", f"-env:UserInstallation=file://{profile_dir}",
+                 "--convert-to", "pdf", "--outdir", tmp_dir, pptx_path],
+                capture_output=True, text=True, timeout=PREVIEW_TIMEOUT_SECONDS,
+            )
+        except FileNotFoundError:
+            raise HTTPException(501, "Preview isn't available -- LibreOffice isn't installed on this server.")
+        except subprocess.TimeoutExpired:
+            raise HTTPException(504, "Preview rendering took too long.")
+
+        pdf_path = os.path.join(tmp_dir, "slide.pdf")
+        if result.returncode != 0 or not os.path.exists(pdf_path):
+            detail = (result.stderr or "").strip()[-500:]
+            raise HTTPException(500, f"Preview rendering failed: {detail or 'unknown error'}")
+
+        pptx_bytes = Path(pptx_path).read_bytes()
+        pdf_bytes = Path(pdf_path).read_bytes()
+
+    return CacheEntry(pptx_bytes=pptx_bytes, pdf_bytes=pdf_bytes,
+                       total_our_slides=total_our_slides, template_slide_count=template_slide_count)
+
+
 @app.get("/", response_class=HTMLResponse)
 def index() -> HTMLResponse:
     # This page is under active development and small; always revalidate
@@ -196,28 +268,39 @@ def api_derive_template(req: DeriveTemplateRequest):
 
 @app.post("/api/render")
 def api_render(req: RenderRequest):
-    report = _build_report(req)
+    # Only ever *reads* the cache -- see render_cache.py's module
+    # docstring for why /api/render doesn't populate it itself. A prior
+    # /api/preview of this exact content (report + options) makes this
+    # instant; otherwise this renders fresh, exactly as if the cache
+    # didn't exist.
+    cached = CACHE.peek(_cache_key(req))
 
     tmp = tempfile.NamedTemporaryFile(suffix=".pptx", delete=False)
     tmp.close()
-    try:
-        with _resolve_template(req.template_base64) as template_path:
-            render_rack(report, tmp.name, rack_label=req.rack_label or None,
-                        visible_stats=req.visible_stats, template_path=template_path,
-                        template_slide=req.template_slide, rack_sizes=req.rack_sizes)
-    except HTTPException:
-        os.unlink(tmp.name)
-        raise
-    except ValueError as exc:
-        os.unlink(tmp.name)
-        raise HTTPException(422, str(exc)) from exc
-    except Exception as exc:
-        os.unlink(tmp.name)
-        if req.template_base64:
-            raise HTTPException(422, f"Couldn't use that template: {exc}") from exc
-        raise
+    if cached is not None:
+        Path(tmp.name).write_bytes(cached.pptx_bytes)
+        source_file = req.report.get("source_file") if isinstance(req.report, dict) else None
+    else:
+        try:
+            report = _build_report(req)
+            with _resolve_template(req.template_base64) as template_path:
+                render_rack(report, tmp.name, rack_label=req.rack_label or None,
+                            visible_stats=req.visible_stats, template_path=template_path,
+                            template_slide=req.template_slide, rack_sizes=req.rack_sizes)
+        except HTTPException:
+            os.unlink(tmp.name)
+            raise
+        except ValueError as exc:
+            os.unlink(tmp.name)
+            raise HTTPException(422, str(exc)) from exc
+        except Exception as exc:
+            os.unlink(tmp.name)
+            if req.template_base64:
+                raise HTTPException(422, f"Couldn't use that template: {exc}") from exc
+            raise
+        source_file = report.source_file
 
-    base = (report.source_file or "rack").rsplit(".", 1)[0]
+    base = (source_file or "rack").rsplit(".", 1)[0]
     filename = f"{base}.rack.pptx"
     return FileResponse(
         tmp.name,
@@ -232,65 +315,36 @@ def api_preview(req: RenderRequest):
     """Renders the exact same .pptx /api/render would produce, then
     rasterizes it with LibreOffice -- so the preview can never drift from
     what a download actually looks like, at the cost of a few seconds and
-    an external process per request."""
-    report = _build_report(req)
+    an external process per request the *first* time this exact content
+    (report + rack label + stats + template + rack sizes) is seen; a
+    repeat -- paging to another slide, or re-previewing after an edit
+    that got reverted -- reuses the cached conversion instead (see
+    render_cache.py)."""
+    entry = CACHE.get_or_compute(_cache_key(req), lambda: _render_and_convert(req))
+
+    # Our slide(s) are always appended after any template slides, so they
+    # occupy a fixed, known range regardless of how many we ended up
+    # adding (1, for the common case; more for a cluster split across
+    # multiple slides -- see render_rack's rack_groups). A multi-slide
+    # render's *last* slide is the aggregated stats slide, not a rack
+    # diagram, so `preview_slide` (1-based, into just our own slides)
+    # lets the caller page through all of them instead of only ever
+    # seeing the first -- defaulting to 1 (the first rack group) since
+    # that's the one most worth a visual sanity check.
+    preview_slide = req.preview_slide or 1
+    if not 1 <= preview_slide <= entry.total_our_slides:
+        raise HTTPException(422, f"preview_slide must be between 1 and {entry.total_our_slides} for this render, got {preview_slide}")
+    target_page = entry.template_slide_count + preview_slide
 
     with tempfile.TemporaryDirectory() as tmp_dir:
-        pptx_path = os.path.join(tmp_dir, "slide.pptx")
-        template_slide_count = 0
-        try:
-            with _resolve_template(req.template_base64) as template_path:
-                if template_path is not None:
-                    template_slide_count = len(Presentation(template_path).slides)
-                render_rack(report, pptx_path, rack_label=req.rack_label or None,
-                            visible_stats=req.visible_stats, template_path=template_path,
-                            template_slide=req.template_slide, rack_sizes=req.rack_sizes)
-        except HTTPException:
-            raise
-        except ValueError as exc:
-            raise HTTPException(422, str(exc)) from exc
-        except Exception as exc:
-            if req.template_base64:
-                raise HTTPException(422, f"Couldn't use that template: {exc}") from exc
-            raise
-
-        # Our slide(s) are always appended after any template slides, so
-        # they occupy a fixed, known range regardless of how many we ended
-        # up adding (1, for the common case; more for a cluster split
-        # across multiple slides -- see render_rack's rack_groups). A
-        # multi-slide render's *last* slide is the aggregated stats slide,
-        # not a rack diagram, so `preview_slide` (1-based, into just our
-        # own slides) lets the caller page through all of them instead of
-        # only ever seeing the first -- defaulting to 1 (the first rack
-        # group) since that's the one most worth a visual sanity check.
         # soffice's PNG export only ever renders slide 1 of a multi-slide
-        # deck with no way to target another one, so we convert to PDF
-        # (which renders every page) and then extract the one page we
-        # want with pdftoppm.
-        total_our_slides = len(Presentation(pptx_path).slides) - template_slide_count
-        preview_slide = req.preview_slide or 1
-        if not 1 <= preview_slide <= total_our_slides:
-            raise HTTPException(422, f"preview_slide must be between 1 and {total_our_slides} for this render, got {preview_slide}")
-        target_page = template_slide_count + preview_slide
-
-        # A dedicated profile dir per request avoids soffice's user-profile
-        # lock contention under concurrent preview requests.
-        profile_dir = os.path.join(tmp_dir, "lo_profile")
-        try:
-            result = subprocess.run(
-                ["soffice", "--headless", f"-env:UserInstallation=file://{profile_dir}",
-                 "--convert-to", "pdf", "--outdir", tmp_dir, pptx_path],
-                capture_output=True, text=True, timeout=PREVIEW_TIMEOUT_SECONDS,
-            )
-        except FileNotFoundError:
-            raise HTTPException(501, "Preview isn't available -- LibreOffice isn't installed on this server.")
-        except subprocess.TimeoutExpired:
-            raise HTTPException(504, "Preview rendering took too long.")
-
-        pdf_path = os.path.join(tmp_dir, "slide.pdf")
-        if result.returncode != 0 or not os.path.exists(pdf_path):
-            detail = (result.stderr or "").strip()[-500:]
-            raise HTTPException(500, f"Preview rendering failed: {detail or 'unknown error'}")
+        # deck with no way to target another one, so the cached artifact
+        # is the *converted PDF* (which has every page), and pdftoppm
+        # pulls out the one page wanted here -- cheap (well under a
+        # second) compared to the conversion that produced it, which is
+        # exactly why caching the PDF is what makes a repeat preview fast.
+        pdf_path = os.path.join(tmp_dir, "cached.pdf")
+        Path(pdf_path).write_bytes(entry.pdf_bytes)
 
         # 180 DPI on our fixed 13.333x7.5in slide yields exactly
         # PREVIEW_WIDTH_PX x PREVIEW_HEIGHT_PX (2400x1350).
@@ -315,5 +369,5 @@ def api_preview(req: RenderRequest):
 
     return Response(
         content=png_bytes, media_type="image/png",
-        headers={"X-Slide-Index": str(preview_slide), "X-Slide-Count": str(total_our_slides)},
+        headers={"X-Slide-Index": str(preview_slide), "X-Slide-Count": str(entry.total_our_slides)},
     )

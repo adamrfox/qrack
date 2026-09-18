@@ -523,15 +523,90 @@ JS:
   with `Content-Disposition: attachment`; `/api/preview` renders that *same*
   `.pptx` to a PNG and streams that instead, so the preview can never drift
   from the real output the way a from-scratch HTML/CSS redraw of the layout
-  could. Costs a few seconds and one-to-two external processes per request,
-  and pulls `libreoffice-impress` + `poppler-utils` into the Docker image
-  (~500MB) — worth it for the fidelity guarantee on a low-traffic internal
-  tool; reconsider if that trade-off ever stops making sense (e.g. a
+  could. Costs a few seconds and one-to-two external processes *the first
+  time this exact content is previewed* (see caching below), and pulls
+  `libreoffice-impress` + `poppler-utils` into the Docker image (~500MB) —
+  worth it for the fidelity guarantee on a low-traffic internal tool;
+  reconsider if that trade-off ever stops making sense (e.g. a
   from-scratch canvas redraw if preview latency/image size become the
   actual complaint).
   - `_resolve_template()` decodes/validates the base64 (size cap, zip magic
     bytes `PK\x03\x04`) into a temp file and yields its path (or `None`);
     template-caused render failures come back as `422` rather than `500`.
+  - **Caching (`web/render_cache.py`)**: essentially all of a preview's
+    latency is the `soffice --convert-to pdf` step (`pdftoppm` extracting
+    one more page from an already-converted PDF is well under a second),
+    so `RenderCache.get_or_compute()` caches that conversion's two
+    outputs (the `.pptx` and its converted `.pdf`) together, keyed by a
+    hash of everything that determines them (`_cache_key` — report, rack
+    label, visible stats, template, rack sizes; deliberately *not*
+    `preview_slide`, which only picks which already-rendered page to
+    extract). Reported directly as a real want ("if it's taking 10s to
+    render... cache any work done in that session so that if the user
+    goes back, most of the work is already done") once the multi-slide
+    pager made "going back" to an already-seen slide a real, repeated
+    action rather than a one-shot preview. Paging back to a slide already
+    seen this session (or re-previewing after an edit that got reverted)
+    now costs roughly what `pdftoppm` alone takes (~1-3s here, dominated
+    by how visually dense that *specific* page is — a rack diagram with
+    many embedded node photos rasterizes slower than a text-only stats
+    page, verified directly; nothing to do with caching) instead of the
+    full ~10s. Content-addressed by construction, so there's no separate
+    cache-invalidation logic to get wrong: any edit changes the hash, and
+    the previous entry simply stops being referenced and ages out on its
+    own (below) rather than needing to be explicitly cleared.
+    - `/api/render` only *reads* this cache (`RenderCache.peek`), never
+      populates it — an entry always carries the `.pptx` and `.pdf`
+      together, and populating one from `/api/render` alone would mean
+      either running the PDF conversion for a plain download that never
+      asked for one (regressing its own normally-fast path back to ~10s)
+      or caching a partial entry with no PDF, which needs its own
+      "backfill the missing half later" logic. Simpler to accept the
+      asymmetry: a download after a preview of the same content is
+      instant; a download with no preceding preview costs nothing extra
+      either way, exactly like before this cache existed.
+    - In-memory (RAM), not disk: this container has no persistent volume
+      (confirmed via `docker inspect` — only the two cert bind mounts),
+      and every render was already meant to be ephemeral, so there's
+      nothing here worth surviving a restart/redeploy either way. What
+      *does* matter under concurrent use from multiple people is memory
+      footprint, not disk space — bounded by `DEFAULT_MAX_BYTES` (an LRU
+      cap, default 512MB, `QRACK_CACHE_MAX_BYTES` env var to override) so
+      a handful of large raw (non-distilled) template uploads can't grow
+      this unbounded. A no-template entry is well under 1MB regardless of
+      rack/slide count in practice (measured: a 2-slide, 55-node render
+      came to ~290KB `.pptx` + ~400KB `.pdf`) — file size tracks which
+      node-photo asset gets embedded, not node/slide count, since
+      python-pptx embeds each image once and every node instance just
+      references it.
+    - TTL eviction (`DEFAULT_TTL_SECONDS`, default 15 min of inactivity,
+      `QRACK_CACHE_TTL_SECONDS` to override) on top of the size cap, since
+      a preview session (upload, tweak, preview, download) is inherently
+      short-lived and an abandoned one shouldn't linger.
+    - **This does not help multiple people rendering *different* reports
+      at the same time** — that's bounded by how many `soffice`
+      conversions the host can actually run concurrently (each is a real
+      LibreOffice process), a separate, not-yet-addressed capacity
+      question; see "Not yet built." What it *does* handle is many
+      concurrent requests for the *identical* not-yet-cached content
+      (e.g. two browser tabs, or a rapid double-click) via
+      `get_or_compute`'s single-flight dedup: a miss claims responsibility
+      for that key via a `threading.Event` in a `_pending` map; a
+      concurrent caller for the same key waits on that event (up to
+      `DEFAULT_WAIT_TIMEOUT_SECONDS`, just above the render pipeline's own
+      timeout) rather than kicking off a second `soffice` process for
+      work already in flight — verified directly: 3 concurrent identical
+      requests peaked at exactly 1 `soffice` process running, and all 3
+      responses came back byte-identical. A wait that times out (or an
+      in-flight compute that fails) falls back to computing it directly
+      rather than risking a request stuck forever behind one dropped
+      connection.
+    - `RenderCache` is a single process-local `dict` guarded by a
+      `threading.Lock` — FastAPI runs these sync `def` endpoints in a
+      thread pool, so this is genuinely concurrent, not just
+      async-concurrent, and the lock matters. Known limitation: doesn't
+      share across multiple worker processes if this app ever stops
+      being single-process (it is today).
 - `POST /api/derive-template` takes `{template_base64, template_slide}`
   (the second optional, same meaning as above) and returns
   `{template_base64: <stripped>}` — the web equivalent of
@@ -752,6 +827,15 @@ Implementation notes (current state):
 
 ## Not yet built (good next tasks, roughly in order)
 
+- A concurrency limiter on simultaneous `soffice` conversions. The render
+  cache (see `/api/preview`'s docs above) makes a *repeat* preview of
+  content already seen this session fast, but does nothing for several
+  people previewing *different* reports at the same moment — each is a
+  cache miss, and each spins up its own LibreOffice process competing for
+  the same host CPU, so enough concurrent first-time renders would slow
+  each other down rather than queue gracefully. A semaphore capping
+  simultaneous conversions (with the rest queued) is the natural fix,
+  raised but explicitly deferred while sketching out the cache.
 - Back-end switch pair when `backend_ports > 0`.
 - Auth, if the web app ever needs to leave a trusted network (currently none
   by design — see the "Docker shape" decision in project history).
