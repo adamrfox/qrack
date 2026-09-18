@@ -278,15 +278,39 @@ Unparsed fields come back `None` rather than raising — callers must handle tha
       slide.
     - Because the stats panel no longer has to compete with rack columns
       for width once there's more than 2 racks, the aggregated stats
-      (still whole-cluster, matching the source report) move to one
-      dedicated, additional final slide instead of squeezing into
-      `compact`/single-column form next to the last rack group —
-      `allow_pair=True, compact=False` there (the original spacious
-      layout), using the slide's full width margin-to-margin.
+      (still whole-cluster, matching the source report) get a *dedicated*
+      final slide -- **except** when the last rack-only slide isn't full
+      (fewer racks than `_racks_per_slide` puts on the others). That
+      slide's rack columns still stop short of the slide's full width, so
+      `_trailing_stats_geometry` puts the stats directly in whatever's
+      left over to their right instead, and there's no separate stats
+      slide at all in that case (`combine_last_with_stats` in
+      `render_rack`). Reported directly, after the always-separate-slide
+      version shipped: "if there are < 3 racks on the last slide, can we
+      just put the stats there rather than creating a whole new slide?"
+      Only the *last* group can ever be smaller than `_racks_per_slide`
+      (every earlier one is exactly full), so this only ever needs to
+      check that one slide, and only when there's more than one group to
+      begin with -- a cluster that fits on a single rack-only slide with
+      exactly `_racks_per_slide` racks (3, today) uses the *entire*
+      width already, so it still gets its own dedicated stats slide, as
+      does any trailing slide that also happens to be exactly full (e.g.
+      6 racks -> two full 3-rack slides -> still 3 slides total, not 2).
+      Whichever way stats end up placed, the rack columns on that slide
+      still use the *same* `rack_w`/`label_w`/`rack_x` positions as every
+      other rack-only slide in the deck (only how much of the row *after*
+      them holds stats differs), so combining never changes a rack's
+      visual scale relative to the rest of the deck -- only whether an
+      extra slide exists. A combined slide's stats get `allow_pair`/
+      `compact` picked the same way the always-shared-with-stats 1-/2-rack
+      case already does (spacious for 1 trailing rack, compact for 2),
+      not the dedicated slide's `allow_pair=True, compact=False` -- there
+      just isn't as much room to work with as a full-width slide gets.
     - Each rack slide's subtitle gets a page-context suffix —
       `"Racks {start}–{end} of {total}"`, or `"Rack {n} of {total}"` when
       a trailing group has only one rack (avoids the awkward
-      "Racks 3–3 of 3") — and the stats slide's is just `"Stats"`; omitted
+      "Racks 3–3 of 3") — regardless of whether that slide also carries
+      the stats; a dedicated stats slide's is just `"Stats"`. Omitted
       entirely for the common single-slide case, so a report that fits in
       one or two racks renders byte-for-byte the same subtitle as before
       this feature existed.

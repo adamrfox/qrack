@@ -469,6 +469,21 @@ def _racks_per_slide(total_racks: int) -> int:
     return 3  # unreachable given today's constants -- rack_w(3) is well above the floor
 
 
+def _trailing_stats_geometry(rack_x_list: list, rack_w, label_w) -> tuple:
+    """`(stats_x, stats_w)` for a *partial* trailing group of rack
+    columns -- fewer racks than a full rack-only slide holds
+    (`_racks_per_slide`), leaving real leftover width to their right.
+    `render_rack` uses this to put the aggregated stats directly on that
+    slide instead of adding a whole extra one just for them, when the
+    cluster's last rack-only slide doesn't fill the width. Reuses
+    `RACK_GAP_NUP` as the gap before the stats panel too, for the same
+    visual rhythm as the gap between rack columns."""
+    last_rack_end = rack_x_list[-1] + rack_w + NODE_LABEL_GAP + label_w
+    stats_x = Emu(round(last_rack_end + RACK_GAP_NUP))
+    stats_w = Emu(round(SLIDE_W - stats_x - STATS_RIGHT_MARGIN))
+    return stats_x, stats_w
+
+
 def _rack_geometry(num_racks: int) -> dict:
     """Positions for `num_racks` rack columns sharing one slide.
     `num_racks == 1` reproduces the module's original single-rack
@@ -1367,16 +1382,18 @@ def render_rack(report: ClusterReport, out_path: str, rack_label: str | None = N
     needs more than one rack (unchanged, exactly one rack, for the common
     case that doesn't). Up to 2 racks share one slide with the stats panel
     alongside them, scaled down to leave it room (see `_rack_geometry`).
-    More than 2 moves the aggregated stats to one final dedicated slide
-    instead (spacious, full width, since nothing else needs that slide's
-    space) covering the *whole* cluster regardless of how many racks it's
-    split across, matching the source report, which never gives a
-    per-rack breakdown either -- and puts as many racks as still stay
-    legible on one full-width rack-only slide (`_racks_per_slide`), only
-    spilling onto additional rack-only slides for a cluster needing more
-    racks than that. Every rack-only slide in a multi-slide deck uses the
-    same geometry for visual consistency across the deck, even a trailing
-    slide with fewer racks left over than the others.
+    More than 2 puts as many racks as still stay legible on one
+    full-width rack-only slide (`_racks_per_slide`), only spilling onto
+    additional rack-only slides for a cluster needing more racks than
+    that; every rack-only slide in a multi-slide deck uses the same
+    geometry for visual consistency across the deck, even a trailing
+    slide with fewer racks left over than the others. The aggregated
+    stats (covering the *whole* cluster, matching the source report,
+    which never gives a per-rack breakdown either) get their own
+    dedicated final slide only when the last rack-only slide is
+    completely full -- when it isn't, its rack columns leave real
+    leftover width, and the stats go directly there instead
+    (`_trailing_stats_geometry`), one slide fewer overall.
 
     `template_path`, when given, is an existing .pptx: our rack slide is
     appended after any slides it already has, using a heuristically-chosen
@@ -1477,6 +1494,19 @@ def render_rack(report: ClusterReport, out_path: str, rack_label: str | None = N
         rack_groups = [racks] if racks else [[]]
         geometry = _rack_geometry(len(racks)) if racks else _rack_geometry(1)
 
+    # A trailing group smaller than a full rack-only slide holds leaves
+    # real leftover width to its right (see _trailing_stats_geometry) --
+    # put the aggregated stats directly there instead of adding a whole
+    # extra slide just for them. Only the *last* group can ever be
+    # smaller than racks_per_slide (every earlier one is exactly full),
+    # and only when there's more than one group to begin with: a cluster
+    # that fits on a single rack-only slide with racks_per_slide racks
+    # exactly (e.g. 3 racks, today) has no leftover width either way, so
+    # it still gets a dedicated stats slide, same as before this existed.
+    combine_last_with_stats = (
+        multi_slide and len(rack_groups) > 1 and len(rack_groups[-1]) < racks_per_slide
+    )
+
     for gi, group in enumerate(rack_groups):
         slide = new_slide()
         suffix = None
@@ -1493,18 +1523,25 @@ def render_rack(report: ClusterReport, out_path: str, rack_label: str | None = N
         legend_y = frame_bottom + Inches(0.18)
         rack_bottom = _draw_legend(slide, geometry["rack_x"][0], legend_y, muted_text)
 
-        if not multi_slide:
-            # Common case: stats share this same slide, exactly as before
-            # multi-slide splitting existed.
+        is_last_group = gi == len(rack_groups) - 1
+        if not multi_slide or (is_last_group and combine_last_with_stats):
+            if multi_slide:
+                stats_x, stats_w = _trailing_stats_geometry(
+                    geometry["rack_x"][:len(group)], geometry["rack_w"], geometry["label_w"])
+                allow_pair, compact = len(group) == 1, len(group) > 1
+            else:
+                # Common case: stats share this same slide, exactly as
+                # before multi-slide splitting existed.
+                stats_x, stats_w = geometry["stats_x"], geometry["stats_w"]
+                allow_pair, compact = len(racks) == 1, len(racks) > 1
             _draw_stats(slide, report, visible_stats, header_fill=header_fill,
-                        stats_x=geometry["stats_x"], stats_w=geometry["stats_w"],
-                        allow_pair=(len(racks) == 1), compact=(len(racks) > 1))
+                        stats_x=stats_x, stats_w=stats_w, allow_pair=allow_pair, compact=compact)
             if report.source_file:
                 source_y = min(rack_bottom, SLIDE_H - Inches(0.32))
                 _text(slide, Inches(0.55), source_y, Inches(6), Inches(0.25),
                       f"Source: {report.source_file}", Pt(8), muted_text)
 
-    if multi_slide:
+    if multi_slide and not combine_last_with_stats:
         # One dedicated stats slide at the end, covering the whole cluster
         # (never a per-rack breakdown -- the source report doesn't have
         # one either). Full slide width, and the original spacious
