@@ -846,10 +846,31 @@
     previewNextBtn.disabled = slideIndex >= slideCount;
   }
 
+  // Disables *these* two buttons, not the (possibly off-screen, and
+  // separately busy-tracked) main Preview button -- a real render takes
+  // several seconds end to end, and a click that doesn't visibly disable
+  // anything reads as "didn't register" long before it reads as "still
+  // loading." Disabling synchronously also rules out a second click
+  // firing while the first is still in flight, which matters beyond
+  // cosmetics: `withButtonBusy` was tried here first, but re-entering it
+  // on the same button from a fast second click captures "Loading…" (the
+  // first call's *already-applied* busy label) as the second call's
+  // "original" label to restore -- so the button could end up stuck
+  // reading "Loading…" forever once both settled. Restoring the pager's
+  // own prior enabled/disabled state on failure (rather than forcing both
+  // buttons open) keeps a boundary slide's Prev/Next correctly disabled
+  // even after a failed retry.
   function goToPreviewSlide(n) {
+    const prevWasDisabled = previewPrevBtn.disabled;
+    const nextWasDisabled = previewNextBtn.disabled;
     currentPreviewSlide = n;
-    withButtonBusy(previewBtn, 'Loading&hellip;', () => fetchAndShowPreview())
-      .catch(err => showError('Could not load that slide: ' + err.message));
+    previewPrevBtn.disabled = true;
+    previewNextBtn.disabled = true;
+    fetchAndShowPreview().catch(err => {
+      showError('Could not load that slide: ' + err.message);
+      previewPrevBtn.disabled = prevWasDisabled;
+      previewNextBtn.disabled = nextWasDisabled;
+    });
   }
   previewPrevBtn.addEventListener('click', () => goToPreviewSlide(currentPreviewSlide - 1));
   previewNextBtn.addEventListener('click', () => goToPreviewSlide(currentPreviewSlide + 1));
@@ -864,7 +885,7 @@
     clearTimeout(autoPreviewTimer);
     withButtonBusy(previewBtn, 'Rendering&hellip;', async () => {
       await fetchAndShowPreview();
-      previewCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      previewCard.scrollIntoView?.({ behavior: 'smooth', block: 'nearest' });
     }).catch(err => showError('Could not render the preview: ' + err.message));
   });
 
