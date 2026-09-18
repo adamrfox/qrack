@@ -54,9 +54,11 @@ sample from later.
 
 A cluster too big for one 42U rack automatically splits across racks
 (scaled down to fit). Up to 2 share one slide with the stats panel alongside
-them; 3 or more spill onto additional slides (2 racks each), with the
-aggregated stats moved to one dedicated final slide instead of squeezing
-next to the last rack group. `--rack-sizes` overrides the auto-split with
+them; 3 or more move the stats to their own dedicated final slide instead,
+which frees the whole slide width for racks -- up to 3 then share one
+rack-only slide (wider per rack than the 2-up case, since nothing else
+needs a share of that width), spilling onto additional rack-only slides
+only for a cluster needing more than that. `--rack-sizes` overrides the auto-split with
 your own node count per rack, e.g. `--rack-sizes 15,15,20` -- the counts must
 add up to the report's total node count.
 

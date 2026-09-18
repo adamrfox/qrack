@@ -205,21 +205,62 @@ Unparsed fields come back `None` rather than raising — callers must handle tha
     font and widens/bottom-anchors the label box whenever `rack_w <
     RACK_W`, so a wrapped second line grows up into the gap under the
     header instead of down into the switch frame.
-  - `_rack_geometry` itself only ever has two presets — 1-up (unscaled,
-    the original single-rack constants) and 2-up (`RACK_W_2UP` etc.) — and
-    raises a clean `ValueError` for any other count; **more than 2 racks
-    is handled one level up, in `render_rack`, by repeating the 2-up
-    preset across additional slides** rather than teaching `_rack_geometry`
-    a third size:
-    - `render_rack` chunks `_split_into_racks`'s result into groups of ≤2
-      racks (`rack_groups`) and calls `_draw_rack`/`_draw_legend` once per
-      group on its own new slide, always requesting `_rack_geometry(2)`
-      for every rack-only slide once there's more than one group —
-      including a trailing group with only 1 rack — so every rack-only
-      slide in a multi-slide deck looks visually consistent rather than
-      having the last one suddenly render at the wider 1-up scale.
+  - `_rack_geometry` has three presets: 1-up (unscaled, the original
+    single-rack constants, shares the slide with stats), 2-up
+    (`RACK_W_2UP` etc., also shares the slide with stats, more cramped),
+    and — for any `num_racks >= 3` — a full-width preset computed by
+    `_full_width_rack_metrics` rather than another fixed size. It raises a
+    clean `ValueError` if that computed width would fall below
+    `RACK_W_MIN_NUP`.
+  - **Why 3+ racks get a *computed*, not fixed, width**: once there's more
+    than 2 racks, the aggregated stats always move to their own dedicated
+    slide (next bullet), so a rack-only slide has the *entire* slide width
+    to itself — no stats panel to leave room for. `_full_width_rack_metrics`
+    divides `SLIDE_W - RACK_X - STATS_RIGHT_MARGIN` (margin to margin)
+    among `num_racks` columns plus their label strips and inter-rack gaps
+    (`RACK_GAP_NUP`), at the same label-width-to-rack-width ratio the 2-up
+    preset uses, so labels keep a consistent look at any rack count. This
+    is why 3 racks actually render *wider* per column (2.67in) than the
+    2-up preset's 2 columns do (2.5in each, sharing the slide with a
+    stats panel) — there's more width to go around once nothing else
+    needs a share of it. Originally this feature (see the multi-rack
+    history below) split every rack-only slide into fixed groups of 2,
+    reusing the 2-up preset even on a slide with no stats panel to leave
+    room for — reported directly ("we're still putting 2 racks on one
+    slide and the 3rd rack on a second slide... can we fit all 3 on the
+    first slide?") once a real 3-rack cluster was tried, which is what
+    motivated computing the width instead of assuming it needs to match
+    the stats-sharing preset.
+  - `_racks_per_slide(total_racks)` is what actually decides how many
+    racks share one full-width slide: the largest N (capped at
+    `total_racks`) whose `_full_width_rack_metrics(N)` width still clears
+    `RACK_W_MIN_NUP`, found by trying `N = total_racks, total_racks - 1,
+    ...` down to 3 (rack width shrinks monotonically as more racks join,
+    so the first one that clears the floor is the largest that does).
+    `RACK_W_MIN_NUP` (`Inches(2.1)`) isn't the chassis-art legibility
+    floor it might look like — it's specifically where `_draw_switch`'s
+    "ToR Switch A/B" label (at the `Pt(8)` `_draw_rack` already drops to
+    once `rack_w < RACK_W`) stops fitting on one line and wraps inside the
+    switch bay. Found by rendering `_draw_switch` alone at a range of
+    widths: 2.1in was the narrowest that still stayed on one line, 1.92in
+    (what 4 racks sharing a slide would compute) already wrapped — so
+    with today's other constants, `_racks_per_slide` always returns
+    exactly 3 for `total_racks >= 3` (verified: `_racks_per_slide(n) == 3`
+    for every `n` from 3 up through at least 8). A cluster needing more
+    than 3 racks spills onto additional rack-only slides, each still
+    sized for 3 (via `_rack_geometry(_racks_per_slide(total_racks))`, the
+    *same* geometry every rack-only slide in the deck uses — never
+    resized down to however many racks a *particular* trailing slide
+    happens to hold), so a trailing slide with fewer racks doesn't
+    suddenly render at a different physical scale than the rest of the
+    deck.
+    - `render_rack` chunks `_split_into_racks`'s result into groups of
+      `_racks_per_slide(len(racks))` (only computed when `len(racks) > 2`
+      — 1 or 2 total racks keep sharing one slide with stats, unchanged)
+      and calls `_draw_rack`/`_draw_legend` once per group on its own new
+      slide.
     - Because the stats panel no longer has to compete with rack columns
-      for width once there's more than one slide, the aggregated stats
+      for width once there's more than 2 racks, the aggregated stats
       (still whole-cluster, matching the source report) move to one
       dedicated, additional final slide instead of squeezing into
       `compact`/single-column form next to the last rack group —

@@ -140,6 +140,27 @@ RACK_GAP_2UP = Inches(0.35)  # between rack 1's label strip and rack 2's frame
 STATS_GAP_2UP = Inches(0.25)  # between rack 2's label strip and the stats panel
 STATS_RIGHT_MARGIN = Inches(0.53)  # matches the single-rack layout's implied right margin
 
+# 3+ racks sharing one slide, no stats panel alongside them -- the
+# aggregated stats always move to their own dedicated slide once there's
+# more than 2 racks (see render_rack), which frees the *whole* slide
+# width for rack columns instead of splitting it with a stats panel like
+# the 2-up preset above does. That's why 3 racks actually render *wider*
+# per column than the 2-up preset's 2 do, not narrower -- there's more
+# width to go around once nothing else needs a share of it. Rack/label
+# width shrink together as more racks join, at the same label-to-rack
+# ratio the 2-up preset uses, so the model-code labels keep a consistent
+# look at any rack count; see _full_width_rack_metrics.
+RACK_GAP_NUP = Inches(0.3)  # between one rack's label strip and the next rack's frame
+# Below this, "ToR Switch A/B" (at the shrunk Pt(8) _draw_rack already
+# drops to under RACK_W) wraps to two lines inside the switch bay instead
+# of fitting on one -- checked empirically by rendering _draw_switch at a
+# range of widths: 2.1in was the narrowest that still stayed on one line,
+# 1.92in (what 4 racks would compute) already wrapped. That in turn caps
+# how many racks can ever share one full-width slide at 3 (see
+# _racks_per_slide) given today's other constants -- a 4th rack would
+# need this to be considerably narrower before it'd fit at all.
+RACK_W_MIN_NUP = Inches(2.1)
+
 
 # --- shape helpers ----------------------------------------------------------
 
@@ -393,17 +414,60 @@ def _split_into_racks(seq: list, rack_sizes: list[int] | None = None) -> list[li
     return racks
 
 
+# label_w scales with rack_w at the same ratio the 2-up preset uses
+# (1.0 / 2.5), so the full-width N-up preset below keeps the same visual
+# proportions instead of picking an unrelated label width.
+_LABEL_TO_RACK_RATIO = NODE_LABEL_W_2UP / RACK_W_2UP
+
+
+def _full_width_rack_metrics(num_racks: int) -> tuple:
+    """`(rack_w, label_w)` for `num_racks` columns sharing the slide's
+    *whole* width, margin to margin, with no stats panel on this slide --
+    see the `RACK_*_NUP` constants' comment. Pure arithmetic, no floor
+    check -- `_racks_per_slide` is what enforces `RACK_W_MIN_NUP`."""
+    avail = SLIDE_W - RACK_X - STATS_RIGHT_MARGIN
+    denom = num_racks * (1 + _LABEL_TO_RACK_RATIO)
+    numerator = avail - num_racks * NODE_LABEL_GAP - (num_racks - 1) * RACK_GAP_NUP
+    rack_w = Emu(round(numerator / denom))
+    label_w = Emu(round(rack_w * _LABEL_TO_RACK_RATIO))
+    return rack_w, label_w
+
+
+def _racks_per_slide(total_racks: int) -> int:
+    """How many of `total_racks` columns can share one full-width slide
+    (see `_full_width_rack_metrics`) before the chassis art/switch labels
+    get too narrow to read. Rack width shrinks monotonically as more
+    racks join, so this is just the largest N (capped at `total_racks`,
+    floored at 3) whose width still clears `RACK_W_MIN_NUP` -- e.g. 3
+    racks actually fit *more* comfortably than the 2-up preset's 2 do
+    (see that constant block's comment), so this only ever reduces
+    `total_racks` for a cluster large enough to need many racks. Only
+    ever called when `total_racks > 2` -- 1 or 2 always share the slide
+    with the stats panel instead, a different (cramped) layout by design;
+    see `_rack_geometry`."""
+    for n in range(total_racks, 2, -1):
+        rack_w, _ = _full_width_rack_metrics(n)
+        if rack_w >= RACK_W_MIN_NUP:
+            return n
+    return 3  # unreachable given today's constants -- rack_w(3) is well above the floor
+
+
 def _rack_geometry(num_racks: int) -> dict:
-    """Positions for `num_racks` rack columns sharing one slide, plus
-    where that leaves the stats panel. `num_racks == 1` reproduces the
-    module's original single-rack constants exactly (`RACK_X`/`RACK_W`/
-    `NODE_LABEL_W`/`STATS_X`/`STATS_W`) -- untouched, unscaled. 2 racks
-    share the narrower `*_2UP` constants on both columns, leaving the
-    stats panel one (rather than side-by-side) column of cards' worth of
-    width. `render_rack` never asks this for more than 2 -- a cluster
-    needing more just repeats a 2-up slide (see `render_rack`'s
-    `rack_groups`) rather than a third geometry preset; a direct call
-    past 2 raises, since there's no matching layout to hand back."""
+    """Positions for `num_racks` rack columns sharing one slide.
+    `num_racks == 1` reproduces the module's original single-rack
+    constants exactly (`RACK_X`/`RACK_W`/`NODE_LABEL_W`/`STATS_X`/
+    `STATS_W`) -- untouched, unscaled -- with the stats panel alongside.
+    2 racks share the narrower `*_2UP` constants on both columns, leaving
+    the stats panel one (rather than side-by-side) column of cards' worth
+    of width -- also sharing the slide with stats. 3 or more use the
+    full-width preset instead (`_full_width_rack_metrics`): the
+    aggregated stats always move to their own dedicated slide once
+    there's more than 2 racks (see `render_rack`), so there's no stats
+    panel to leave room for here -- `stats_x`/`stats_w` come back `None`.
+    Raises for a rack width that would fall below `RACK_W_MIN_NUP` --
+    `render_rack` never actually hits that, since it calls this by way of
+    `_racks_per_slide`, which already enforces the same floor when
+    choosing how many racks to put on one slide."""
     if num_racks == 1:
         return {"rack_x": [RACK_X], "rack_w": RACK_W, "label_w": NODE_LABEL_W,
                 "stats_x": STATS_X, "stats_w": STATS_W}
@@ -414,7 +478,15 @@ def _rack_geometry(num_racks: int) -> dict:
         stats_w = SLIDE_W - stats_x - STATS_RIGHT_MARGIN
         return {"rack_x": [rack_x0, rack_x1], "rack_w": RACK_W_2UP, "label_w": NODE_LABEL_W_2UP,
                 "stats_x": stats_x, "stats_w": stats_w}
-    raise ValueError(f"_rack_geometry only supports 1 or 2 racks per slide, got {num_racks}")
+    rack_w, label_w = _full_width_rack_metrics(num_racks)
+    if rack_w < RACK_W_MIN_NUP:
+        raise ValueError(
+            f"{num_racks} racks won't fit legibly on one slide "
+            f"(rack width would be {rack_w / 914400:.2f}in, minimum is {RACK_W_MIN_NUP / 914400:.2f}in)"
+        )
+    step = rack_w + NODE_LABEL_GAP + label_w + RACK_GAP_NUP
+    rack_x = [Emu(round(RACK_X + i * step)) for i in range(num_racks)]
+    return {"rack_x": rack_x, "rack_w": rack_w, "label_w": label_w, "stats_x": None, "stats_w": None}
 
 
 def _rack_labels(base_label: str | None, num_racks: int) -> list[str]:
@@ -1259,16 +1331,18 @@ def render_rack(report: ClusterReport, out_path: str, rack_label: str | None = N
     `rack_sizes`, when given, is an explicit node count per rack (see
     `_split_into_racks`); omit it to auto-split by RU whenever the cluster
     needs more than one rack (unchanged, exactly one rack, for the common
-    case that doesn't). Up to 2 racks share one slide, scaled down (see
-    `_rack_geometry`) to leave room for the stats panel alongside them.
-    More than 2 racks spills onto additional slides -- 2 racks per slide,
-    stats moved to one final dedicated slide (spacious, full width, since
-    nothing else needs that slide's space) covering the *whole* cluster
-    regardless of how many racks it's split across, matching the source
-    report, which never gives a per-rack breakdown either. Every rack-only
-    slide in a multi-slide deck uses the same (narrower, 2-up) geometry
-    for visual consistency across the deck, even a trailing slide with
-    just one rack left over.
+    case that doesn't). Up to 2 racks share one slide with the stats panel
+    alongside them, scaled down to leave it room (see `_rack_geometry`).
+    More than 2 moves the aggregated stats to one final dedicated slide
+    instead (spacious, full width, since nothing else needs that slide's
+    space) covering the *whole* cluster regardless of how many racks it's
+    split across, matching the source report, which never gives a
+    per-rack breakdown either -- and puts as many racks as still stay
+    legible on one full-width rack-only slide (`_racks_per_slide`), only
+    spilling onto additional rack-only slides for a cluster needing more
+    racks than that. Every rack-only slide in a multi-slide deck uses the
+    same geometry for visual consistency across the deck, even a trailing
+    slide with fewer racks left over than the others.
 
     `template_path`, when given, is an existing .pptx: our rack slide is
     appended after any slides it already has, using a heuristically-chosen
@@ -1350,24 +1424,31 @@ def render_rack(report: ClusterReport, out_path: str, rack_label: str | None = N
     labels = _rack_labels(rack_label, len(racks))
     label_iter = iter(labels)
 
-    # 2 racks per slide, same grouping _rack_geometry already handles for
-    # a single slide -- a cluster needing more than that just repeats it
-    # across additional slides instead of a third geometry preset.
-    rack_groups = [racks[i:i + 2] for i in range(0, len(racks), 2)] or [[]]
-    multi_slide = len(rack_groups) > 1
+    # 1 or 2 racks always share their one slide with the stats panel
+    # (the common case, unchanged since before multi-slide splitting
+    # existed). More than 2 always moves stats to their own dedicated
+    # slide -- freeing the *whole* width for rack columns -- and fits as
+    # many racks per rack-only slide as still stay legible
+    # (`_racks_per_slide`); only a cluster needing more racks than that
+    # spills onto additional rack-only slides, each sized the same as the
+    # others (not shrunk further to fit that slide's own smaller leftover
+    # count) so a trailing slide doesn't suddenly render at a different
+    # physical scale than the rest of the deck.
+    multi_slide = len(racks) > 2
+    if multi_slide:
+        racks_per_slide = _racks_per_slide(len(racks))
+        rack_groups = [racks[i:i + racks_per_slide] for i in range(0, len(racks), racks_per_slide)]
+        geometry = _rack_geometry(racks_per_slide)
+    else:
+        rack_groups = [racks] if racks else [[]]
+        geometry = _rack_geometry(len(racks)) if racks else _rack_geometry(1)
 
     for gi, group in enumerate(rack_groups):
         slide = new_slide()
-        # Every rack-only slide in a multi-slide deck shares one geometry
-        # (2-up) regardless of whether *this particular* slide has 1 or 2
-        # racks -- so a trailing odd rack doesn't suddenly render at a
-        # different physical scale than the rest of the deck. The single-
-        # slide case (not multi_slide) still sizes to its own actual rack
-        # count, exactly as before this existed.
-        geometry = _rack_geometry(2) if multi_slide else _rack_geometry(len(group))
         suffix = None
         if multi_slide:
-            start, end = gi * 2 + 1, gi * 2 + len(group)
+            start = gi * racks_per_slide + 1
+            end = gi * racks_per_slide + len(group)
             suffix = f"Rack {start} of {len(racks)}" if start == end else f"Racks {start}–{end} of {len(racks)}"
         draw_header(slide, suffix)
 
