@@ -644,23 +644,40 @@ def _draw_rack(slide, seq: list, rack_label: str, rack_x, rack_w, label_w, label
     available = RACK_BOTTOM_MAX - RACK_Y - 2 * SWITCH_H
     frame_h = 2 * SWITCH_H + available  # the rack frame always spans the full 42U enclosure
 
+    # What 1U looks like at true full-rack scale -- a *fixed* ratio (this
+    # rack's node capacity, not this rack's own total_ru), so a rack at
+    # 75% of capacity actually renders at ~75% of the available height,
+    # not stretched to fill it. Using `available / total_ru` instead (an
+    # earlier version of this) always fills the *entire* available height
+    # exactly, by construction, regardless of total_ru -- a 15-node and a
+    # 20-node rack looked physically identical, with no blank space
+    # differentiating "3/4 full" from "completely full", the opposite of
+    # what the diagram is for. Reported directly: "blank space... but as
+    # the number of nodes increases, it appears to have the rack full
+    # regardless of the number of nodes."
+    full_scale_ru_height = available / RACK_NODE_CAPACITY_U
+
     if total_ru > RACK_TOTAL_U:
         # More nodes than physically fit in one 42U rack -- shouldn't
         # normally happen once a report's `_split_into_racks` result is
-        # respected, but compress to fit rather than overflowing the frame
-        # if it ever does (e.g. a manual rack_sizes override that packs
-        # one rack past capacity on purpose).
+        # respected, but compress *further* than true scale to fit rather
+        # than overflowing the frame if it ever does (e.g. a manual
+        # rack_sizes override that packs one rack past capacity on
+        # purpose). This is the one case that's still allowed to rescale
+        # to this rack's own total_ru, since there's no other way to make
+        # an intentionally-overstuffed rack fit at all.
         ru_height = available / total_ru
-    else:
-        # Give nodes a legible floor height, even though that means small
-        # clusters render "bigger" than strict 1/42-scale would dictate --
-        # below this the 1U node photo stretches into unrecognizable noise.
-        # Only compress toward true scale once a floor-sized stack of every
-        # node this report has genuinely wouldn't fit in the available
-        # space (i.e. the rack is close to physically full).
+    elif NODE_MIN_LEGIBLE_H * total_ru <= available:
+        # Small cluster: floor height keeps nodes legible, at the cost of
+        # rendering "bigger" than true scale -- below this the 1U node
+        # photo stretches into unrecognizable noise. The empty space
+        # above them is real, showing genuine slack in the rack.
         ru_height = NODE_MIN_LEGIBLE_H
-        if ru_height * total_ru > available:
-            ru_height = available / total_ru
+    else:
+        # Big enough that floor height would overflow -- fall back to
+        # true full-rack scale (fixed, see above), so how full this rack
+        # actually is stays visually honest instead of always maxing out.
+        ru_height = full_scale_ru_height
     ru_height = max(RU_MIN, min(RU_MAX, ru_height))
 
     frame_bottom_y = RACK_Y + frame_h

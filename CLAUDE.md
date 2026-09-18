@@ -428,6 +428,27 @@ handling for a bad input path or an out-of-range `--slide`.
   bounding box the same way the existing ones were (see the comments
   above `NODE_PHOTO_CROP`/`NODE_PHOTO_2U_CROP` in `renderer.py`), and add
   one more branch next to the `ru == 2` one.
+- **The rack diagram's empty space is meant to be a real signal of how
+  full the rack physically is, not just a small-cluster affordance.**
+  `_draw_rack` picks one of three node-row heights: `NODE_MIN_LEGIBLE_H`
+  (a legible floor for a small cluster, rendering "bigger" than true
+  scale), true full-rack scale (`available / RACK_NODE_CAPACITY_U` — a
+  *fixed* ratio, not recomputed per rack) once the floor would overflow,
+  or `available / total_ru` only in the pathological case of a rack
+  packed past its real 42U capacity (can't happen from auto-split; only
+  a manual `rack_sizes` override forcing it). Getting the middle case
+  wrong is an easy mistake to reintroduce: computing it as
+  `available / total_ru` too (i.e. "whatever height exactly fills the
+  available space for *this* rack's own node count") makes *every* rack
+  past the floor threshold render as 100% full regardless of its actual
+  count, since that formula is tautologically self-filling — a 15-node
+  and a 20-node rack (both in the same 40U-capacity slot) looked
+  physically identical. Reported directly: "with a few nodes... I see
+  blank space... but as the number of nodes increases, it appears to
+  have the rack full regardless of the number of nodes." Fixed by
+  keying that middle case to the rack's fixed capacity instead of its
+  own count, so a 15-node rack now visibly shows ~25% empty space above
+  the node stack while a 20-node one (genuinely at capacity) shows none.
 - **Heterogeneous clusters are normal.** The "All Nodes" section lists one block
   per model, each with its own count/raw/height. Never assume a single model.
 - **Cabling:** each node has 2 front-end ports → dual-homed, one link to each of

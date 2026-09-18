@@ -330,6 +330,17 @@
   async function uploadFile(file) {
     clearError();
     confirmCard.hidden = true;
+    // A preview (and its pager) belongs to whatever report was showing
+    // when it was rendered -- leaving it up while a new PDF parses reads
+    // as "this is still the preview for what I just uploaded," which
+    // it isn't. Clear it immediately, not just once the new report's
+    // confirm step renders, so there's no window where a stale preview
+    // is visible under a blank/loading upload card.
+    previewCard.hidden = true;
+    if (previewUrl) { URL.revokeObjectURL(previewUrl); previewUrl = null; }
+    previewImg.src = '';
+    currentPreviewSlide = 1;
+    clearTimeout(autoPreviewTimer);
     dropzoneText.innerHTML = '<span class="spinner" style="border-color:#5a6472;border-top-color:transparent"></span>Parsing ' + file.name + '&hellip;';
 
     const form = new FormData();
