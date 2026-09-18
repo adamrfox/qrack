@@ -381,12 +381,29 @@ def _split_into_racks(seq: list, rack_sizes: list[int] | None = None) -> list[li
     to be the user's edit of a previous auto-split result, so it must
     fully account for every node: raises `ValueError` if any count is
     negative or the counts don't sum to `len(seq)` exactly, rather than
-    silently dropping or absorbing a mismatch into the last rack.
+    silently dropping or absorbing a mismatch into the last rack. A `0`
+    is valid, though, and deliberately not the same as omitting that
+    rack from the list entirely -- see below.
 
     When omitted, racks are filled automatically by cumulative RU up to
     `RACK_NODE_CAPACITY_U` per rack. The overwhelmingly common case --
     everything fits in one rack -- yields exactly `[seq]`, so this is a
     no-op for every report that predates multi-rack support.
+
+    Either way, a rack that ends up with zero nodes is dropped from the
+    result -- the web UI always offers a couple of extra, empty rack
+    slots beyond whatever a cluster strictly needs (so a small cluster
+    that fits in one rack can still be deliberately spread across more,
+    e.g. to match an existing physical layout), and a slot the user
+    never assigns anything to should vanish, not render as a bare
+    frame with two switches and no nodes. `render_rack`'s label
+    numbering (`_rack_labels`) and slide grouping (`_racks_per_slide`)
+    both key off this already-filtered list, so a user filling in racks
+    1 and 3 while leaving 2 empty gets "Rack 1"/"Rack 2" in the output,
+    not "Rack 1"/"Rack 3" naming a rack that was never drawn. The `or
+    [[]]` keeps this function's own invariant of always returning at
+    least one (possibly empty) rack for the degenerate zero-node-total
+    case, rather than an empty list.
     """
     if rack_sizes is not None:
         if any(n < 0 for n in rack_sizes):
@@ -398,7 +415,7 @@ def _split_into_racks(seq: list, rack_sizes: list[int] | None = None) -> list[li
         for n in rack_sizes:
             racks.append(seq[i:i + n])
             i += n
-        return racks
+        return [r for r in racks if r] or [[]]
 
     racks = []
     current: list = []
@@ -411,7 +428,7 @@ def _split_into_racks(seq: list, rack_sizes: list[int] | None = None) -> list[li
         current.append(node)
         current_ru += node["ru"]
     racks.append(current)
-    return racks
+    return [r for r in racks if r] or [[]]
 
 
 # label_w scales with rack_w at the same ratio the 2-up preset uses

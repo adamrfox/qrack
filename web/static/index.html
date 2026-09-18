@@ -459,16 +459,27 @@
     return true;
   }
 
+  // Always offered beyond whatever a cluster strictly needs -- so a
+  // cluster that fits in one rack can still be deliberately spread
+  // across more (e.g. to match an existing physical layout), not just
+  // edited once splitting is already mandatory. A slot left at 0 isn't
+  // rendered at all (see renderer._split_into_racks), so these extra
+  // slots cost nothing if unused.
+  const EXTRA_RACK_SLOTS = 2;
+
   async function setupRackSplit(report) {
     rackSplitSection.hidden = true;
     rackSplitErrorEl.hidden = true;
     autoRackSizes = null;
-    const sizes = await fetchRackSplit(report);
-    if (!sizes || sizes.length <= 1) return;
-    autoRackSizes = sizes;
-    rackSplitHint.textContent =
-      `This cluster needs ${sizes.length} racks. Auto-split shown below -- edit the counts for a different split.`;
-    renderRackSplitInputs(sizes);
+    if (totalReportNodeCount() <= 0) return; // nothing to split
+    const natural = await fetchRackSplit(report);
+    if (!natural) return; // network hiccup -- treat as "nothing to show", not a hard error
+    const padded = [...natural, ...Array(EXTRA_RACK_SLOTS).fill(0)];
+    autoRackSizes = padded;
+    rackSplitHint.textContent = natural.length > 1
+      ? `This cluster needs ${natural.length} racks. Auto-split shown below -- edit the counts for a different split, or use one of the extra empty racks to spread it further.`
+      : `This cluster fits in one rack by default -- enter counts below if you'd like to spread it across more racks instead.`;
+    renderRackSplitInputs(padded);
     rackSplitSection.hidden = false;
   }
 

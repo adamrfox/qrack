@@ -161,6 +161,23 @@ Unparsed fields come back `None` rather than raising — callers must handle tha
     so it's strict: raises `ValueError` if any count is negative or the
     counts don't sum to the report's total node count exactly, rather than
     silently dropping nodes or absorbing a mismatch into the last rack.
+    A `0` is valid and meaningfully different from omitting that slot:
+    it's what lets a cluster that fits in one rack be *deliberately*
+    spread across more anyway (e.g. to match an existing physical
+    layout) rather than the split editor only ever appearing once
+    splitting is already mandatory. `_split_into_racks` drops any
+    resulting empty rack from what it returns — a slot left at 0 isn't
+    rendered as a bare frame with two switches and no nodes, it just
+    isn't there, and `_rack_labels`/`_racks_per_slide` number and group
+    whatever's left sequentially (filling ranks 1 and 3 while leaving 2
+    at zero yields "Rack 1"/"Rack 2" in the output, not "Rack 1"/"Rack 3"
+    naming a rack that was never drawn). Reported directly: "we can let
+    the user change the number of nodes per rack just like we do for a
+    true multi-rack use case... if a rack has 0 nodes in it, we
+    shouldn't render it at all." The web UI's rack-split editor (below)
+    always offers 2 such extra empty slots beyond whatever a cluster
+    strictly needs, specifically so this is reachable without a cluster
+    needing to already be too big for one rack.
   - **Up to 2 racks share one slide** (`_rack_geometry`), scaled down on
     both the rack frame and its label strip (`RACK_W_2UP`/
     `NODE_LABEL_W_2UP`, vs. the single-rack `RACK_W`/`NODE_LABEL_W`) to
@@ -526,7 +543,9 @@ JS:
   fields to start from. Called once right after `/api/parse` resolves,
   since the total node count it depends on never changes from anything
   else editable in the confirm step (only `new_count`, not `count`, is
-  user-editable there).
+  user-editable there). Always the *natural* minimal split — the
+  frontend is what pads this with extra empty slots before displaying
+  it (see "Rack split" below), not this endpoint.
 - `POST /api/render` and `POST /api/preview` take the same body — `{report`
   (possibly edited by the user), `rack_label`, `visible_stats`,
   `template_base64`, `template_slide`, `rack_sizes`, `preview_slide}` (the
@@ -703,21 +722,34 @@ template), then calls preview and/or render.
 **Rack split**: right after `renderConfirm` sets `currentReport`, it fires
 `/api/rack-split` (not awaited — a self-contained async call that fills in
 its own UI once it resolves, nothing else in `renderConfirm` depends on
-it) and hides the `#rack-split-section` block by default. If the response
-has more than one rack, that section un-hides with one number input per
-rack (`data-rack-idx="0"`, `"1"`, ...), pre-filled with the suggested
-split, plus a "Reset to auto-split" button that restores those same
-values. A cluster that fits in one rack never shows this section at all —
-`buildPayload()` sends `rack_sizes: null` whenever it's hidden, so nothing
-about the request changes for the common case. `validateRackSplit()`
-(non-negative integers, summing to the report's total node count) runs
-client-side on every edit and before every Preview/Generate click —
-gating `scheduleAutoPreview()` itself (not each call site separately)
-means every path that could trigger a render (rack label edits, stat
-toggles, the rack-split fields themselves) automatically respects it —
-so a typo is caught immediately with an inline message instead of costing
-a round-trip to the server's own `rack_sizes` validation in
-`_split_into_racks`.
+it) and hides the `#rack-split-section` block until it does. The response
+is always the *natural* minimal split (`auto_rack_split` — one rack, for
+a cluster that fits in one, exactly as before this existed); the frontend
+pads it with `EXTRA_RACK_SLOTS` (2) trailing zeros before rendering the
+inputs, one number input per slot (`data-rack-idx="0"`, `"1"`, ...), so
+the section shows for *every* report, not just one that already needs
+more than one rack — a small cluster can be deliberately spread across
+extra racks (see `_split_into_racks`'s handling of a `0` entry above) by
+typing into what start as those empty padding slots, not only edited
+once splitting is already mandatory. `rackSplitHint`'s wording branches
+on whether the natural split needed more than one rack, to explain which
+situation the user's in. "Reset to auto-split" restores that same padded
+array (`autoRackSizes`), not just the natural one. `validateRackSplit()`
+(non-negative integers, summing to the report's total node count — 0 is
+explicitly allowed, unremarkably, since it's the padding slots'
+resting state) runs client-side on every edit and before every
+Preview/Generate click — gating `scheduleAutoPreview()` itself (not each
+call site separately) means every path that could trigger a render (rack
+label edits, stat toggles, the rack-split fields themselves)
+automatically respects it, so a typo is caught immediately with an inline
+message instead of costing a round-trip to the server's own `rack_sizes`
+validation in `_split_into_racks`. `buildPayload()` sends whatever's
+currently in the inputs as `rack_sizes` essentially always now (the
+section is hidden only before a report loads, or if it somehow has zero
+total nodes) — including the untouched padded default, which the server
+resolves down to exactly the natural split anyway (the trailing zeros get
+dropped), so this is a no-op over always sending `null` for a report that
+doesn't touch the extra slots.
 
 The template picker has a "style only"
 checkbox (checked by default) that, when a file is chosen, first round-trips
